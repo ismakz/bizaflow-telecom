@@ -1,36 +1,71 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+## Bizaflow Telecom
 
-## Getting Started
+Application Next.js + Firebase avec:
+- auth / roles / statuts,
+- appels internes temps reel,
+- appels externes provider (mock ou API),
+- facturation pack -> bonus -> balance,
+- dashboards user + CEO.
 
-First, run the development server:
+## Lancement local
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Copier `.env.example` vers `.env.local`, puis renseigner toutes les variables.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Lancement sur Vercel
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### 1) Variables d'environnement
 
-## Learn More
+Dans Vercel -> Project Settings -> Environment Variables, configurer:
 
-To learn more about Next.js, take a look at the following resources:
+- `NEXT_PUBLIC_FIREBASE_API_KEY`
+- `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN`
+- `NEXT_PUBLIC_FIREBASE_PROJECT_ID`
+- `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET`
+- `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID`
+- `NEXT_PUBLIC_FIREBASE_APP_ID`
+- `NEXT_PUBLIC_VOICE_PROVIDER_MODE` (`mock` ou `api`)
+- `NEXT_PUBLIC_VOICE_REAL_ENABLED` (`true` ou `false`)
+- `VOICE_PROVIDER_REAL_ENABLED` (`true` ou `false`)
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_AUTH_TOKEN`
+- `TWILIO_FROM_NUMBER`
+- `APP_BASE_URL` (URL publique Vercel)
+- `FIREBASE_ADMIN_PROJECT_ID`
+- `FIREBASE_ADMIN_CLIENT_EMAIL`
+- `FIREBASE_ADMIN_PRIVATE_KEY` (avec `\n`)
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### 2) Firestore rules
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Publier les regles Firestore en production avant le deploy.
 
-## Deploy on Vercel
+### 3) Callback Twilio
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Configurer le callback status:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+`https://<ton-domaine-vercel>/api/voice/status`
+
+Events:
+- initiated
+- ringing
+- answered
+- completed
+
+### 4) Build et deploy
+
+```bash
+npm run build
+```
+
+Puis deploy via Vercel (integration Git recommandee).
+
+### 5) Validation post-deploy
+
+- connexion user approved OK
+- appels internes entrant/sortant OK
+- appels externes mode mock/reel selon env
+- historique + transactions coherents
