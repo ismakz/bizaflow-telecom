@@ -271,7 +271,7 @@ export default function DashboardPage() {
           }}>
             <div style={{
               width: 40, height: 40, borderRadius: '50%',
-              background: lastCall.type === 'internal' ? 'rgba(6, 182, 212, 0.12)' : 'rgba(245, 158, 11, 0.12)',
+              background: lastCall.type === 'internal_call' ? 'rgba(6, 182, 212, 0.12)' : 'rgba(245, 158, 11, 0.12)',
               display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1rem',
             }}>
               {lastCall.direction === 'outgoing' ? '📤' : '📥'}
