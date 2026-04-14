@@ -102,6 +102,7 @@ export interface TelecomPackDoc {
   description: string;
   isActive: boolean;
   color: string;
+  popular?: boolean;
   createdAt: Timestamp | ReturnType<typeof serverTimestamp>;
 }
 
