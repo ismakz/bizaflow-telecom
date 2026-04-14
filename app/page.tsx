@@ -5,7 +5,6 @@ import Link from 'next/link';
 import { useApp } from '@/app/components/AppProvider';
 import { getInitials, formatRelativeTime, timestampToISO } from '@/app/lib/utils';
 import { getUserTransactions, getActiveUserPack, type TelecomTransactionDoc, type TelecomUserPackDoc } from '@/app/lib/firestore';
-import CallSimulator from '@/app/components/CallSimulator';
 import RechargeModal from '@/app/components/RechargeModal';
 import TransferModal from '@/app/components/TransferModal';
 
@@ -15,7 +14,7 @@ const typeLabels: Record<string, string> = {
 };
 
 export default function DashboardPage() {
-  const { user, contacts, calls, callState, loading } = useApp();
+  const { user, contacts, calls, loading } = useApp();
   const [greeting, setGreeting] = useState('Bonjour');
   const [copied, setCopied] = useState(false);
   const [showRecharge, setShowRecharge] = useState(false);
@@ -74,7 +73,6 @@ export default function DashboardPage() {
 
   return (
     <div className="page-container" style={{ paddingBottom: 90 }}>
-      {callState.active && <CallSimulator />}
       <RechargeModal isOpen={showRecharge} onClose={() => setShowRecharge(false)} />
       <TransferModal isOpen={showTransfer} onClose={() => setShowTransfer(false)} />
 

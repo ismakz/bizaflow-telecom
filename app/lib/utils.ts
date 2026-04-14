@@ -234,3 +234,22 @@ export function timestampToISO(ts: { seconds: number; nanoseconds: number } | nu
   if (!ts || !('seconds' in ts)) return null;
   return new Date(ts.seconds * 1000).toISOString();
 }
+
+/** Évite un écran de chargement infini si Firestore ou le réseau ne répond pas. */
+export function promiseWithTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      reject(new Error(`${label} — délai dépassé (${ms / 1000}s)`));
+    }, ms);
+    promise.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      }
+    );
+  });
+}

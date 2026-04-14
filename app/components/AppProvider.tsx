@@ -1,10 +1,11 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { collection, doc, onSnapshot, query, where } from 'firebase/firestore';
 import type { User, Contact, CallRecord, CallSimulationState } from '@/app/lib/types';
-import BizaflowLogo from '@/app/components/BizaflowLogo';
+import LoadingShell from '@/app/components/LoadingShell';
+import ToastStack, { type ToastItem } from '@/app/components/ToastStack';
 import { onAuthChange, signOut as authSignOut } from '@/app/lib/auth';
 import {
   getTelecomUser,
@@ -23,7 +24,14 @@ import {
   cancelInternalCallPair,
   performRecharge,
 } from '@/app/lib/firestore';
-import { calculateCallCost, detectOperator, generateAvatarColor, timestampToISO } from '@/app/lib/utils';
+import {
+  calculateCallCost,
+  detectOperator,
+  formatDuration,
+  generateAvatarColor,
+  timestampToISO,
+  promiseWithTimeout,
+} from '@/app/lib/utils';
 import { db } from '@/app/lib/firebase';
 import { getProviderRuntimeInfo, voiceProvider, type ProviderMode } from '@/app/lib/voiceProvider';
 
@@ -45,6 +53,7 @@ interface AppContextType {
   rechargeCredit: (amount: number) => Promise<void>;
   refreshData: () => Promise<void>;
   logout: () => Promise<void>;
+  showToast: (opts: { message: string; variant?: 'success' | 'error' | 'info' }) => void;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -79,17 +88,34 @@ function getTargetRoute(userData: User, currentPath: string): string | null {
   return null;
 }
 
+const PROFILE_FETCH_MS = 45_000;
+
 export default function AppProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
+  const pathnameRef = useRef(pathname);
+  pathnameRef.current = pathname;
+  const authListenerReadyRef = useRef(false);
   const [user, setUser] = useState<User | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [calls, setCalls] = useState<CallRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [authUid, setAuthUid] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [callState, setCallState] = useState<CallSimulationState>({
+    active: false, phase: 'ringing', contact: null, startTime: 0, duration: 0, isInternal: false, direction: 'outgoing',
+  });
   const [currentInternalCallIds, setCurrentInternalCallIds] = useState<{ outgoingCallId: string; incomingCallId: string; callSessionId: string } | null>(null);
   const [currentInternalCallRole, setCurrentInternalCallRole] = useState<'caller' | 'callee' | null>(null);
+  /** Toujours à jour pour les handlers async (répondre / refuser) */
+  const internalCallPairRef = useRef(currentInternalCallIds);
+  const callActiveRef = useRef(false);
+  useEffect(() => {
+    internalCallPairRef.current = currentInternalCallIds;
+  }, [currentInternalCallIds]);
+  useEffect(() => {
+    callActiveRef.current = callState.active;
+  }, [callState.active]);
   const [externalProviderSession, setExternalProviderSession] = useState<{
     providerMode: ProviderMode;
     providerName: string;
@@ -98,10 +124,6 @@ export default function AppProvider({ children }: { children: ReactNode }) {
     externalResponse?: unknown;
     isRealTelephony: boolean;
   } | null>(null);
-
-  const [callState, setCallState] = useState<CallSimulationState>({
-    active: false, phase: 'ringing', contact: null, startTime: 0, duration: 0, isInternal: false, direction: 'outgoing',
-  });
 
   const buildUserObject = useCallback((profile: Awaited<ReturnType<typeof getTelecomUser>>): User | null => {
     if (!profile) return null;
@@ -115,16 +137,51 @@ export default function AppProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // ── Auth listener ──
+  const toastIdRef = useRef(0);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+  const showToast = useCallback(
+    (opts: { message: string; variant?: 'success' | 'error' | 'info' }) => {
+      const id = ++toastIdRef.current;
+      const variant = opts.variant ?? 'info';
+      setToasts((prev) => [...prev, { id, message: opts.message, variant }]);
+      window.setTimeout(() => dismissToast(id), 4500);
+    },
+    [dismissToast]
+  );
+
+  // Si Firebase Auth ne répond pas (config .env manquante, etc.), ne pas rester bloqué sur « Chargement… »
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      if (!authListenerReadyRef.current) {
+        setAuthError(
+          'Initialisation trop lente ou impossible. Vérifiez NEXT_PUBLIC_FIREBASE_* dans .env.local et votre connexion.'
+        );
+        setLoading(false);
+      }
+    }, 18_000);
+    return () => window.clearTimeout(t);
+  }, []);
+
+  // ── Auth listener (stable : pas de pathname dans les deps → évite de se désabonner à chaque navigation) ──
   useEffect(() => {
     const unsubscribe = onAuthChange(async (firebaseUser) => {
+      authListenerReadyRef.current = true;
+      const path = pathnameRef.current;
+
       if (firebaseUser) {
         console.log('[Auth] ✅ Utilisateur connecté:', firebaseUser.uid, firebaseUser.email);
         setAuthUid(firebaseUser.uid);
         setAuthError(null);
 
         try {
-          const profile = await getTelecomUser(firebaseUser.uid);
+          const profile = await promiseWithTimeout(
+            getTelecomUser(firebaseUser.uid),
+            PROFILE_FETCH_MS,
+            'Chargement du profil Firestore'
+          );
           console.log('[Firestore] Profil trouvé:', profile ? 'OUI' : 'NON');
 
           if (profile) {
@@ -134,7 +191,7 @@ export default function AppProvider({ children }: { children: ReactNode }) {
             setLoading(false);
 
             if (userData) {
-              const target = getTargetRoute(userData, pathname);
+              const target = getTargetRoute(userData, path);
               console.log('[Router] Route cible:', target || '(page actuelle OK)');
               if (target) router.push(target);
             }
@@ -145,16 +202,21 @@ export default function AppProvider({ children }: { children: ReactNode }) {
             setUser(null);
             setLoading(false);
             // Don't stay stuck — redirect to login
-            if (!isPublicPage(pathname)) {
+            if (!isPublicPage(path)) {
               router.push('/login');
             }
           }
         } catch (err) {
           console.error('[Firestore] ❌ Erreur lecture profil:', err);
-          setAuthError('Erreur de chargement du profil. Vérifiez votre connexion.');
+          const msg = err instanceof Error ? err.message : String(err);
+          setAuthError(
+            msg.includes('délai dépassé')
+              ? 'Le profil met trop de temps à charger (réseau ou Firestore). Réessayez ou vérifiez les règles / la connexion.'
+              : 'Erreur de chargement du profil. Vérifiez votre connexion.'
+          );
           setUser(null);
           setLoading(false);
-          if (!isPublicPage(pathname)) {
+          if (!isPublicPage(path)) {
             router.push('/login');
           }
         }
@@ -166,14 +228,14 @@ export default function AppProvider({ children }: { children: ReactNode }) {
         setCalls([]);
         setAuthError(null);
         setLoading(false);
-        if (!isPublicPage(pathname)) {
+        if (!isPublicPage(path)) {
           router.push('/login');
         }
       }
     });
 
     return () => unsubscribe();
-  }, [pathname, router, buildUserObject]);
+  }, [router, buildUserObject]);
 
   // ── Re-check routing on pathname change ──
   useEffect(() => {
@@ -268,28 +330,50 @@ export default function AppProvider({ children }: { children: ReactNode }) {
 
   const addContact = useCallback(async (contact: { name: string; phone: string; isInternal: boolean }) => {
     if (!authUid) return;
-    let isInternal = contact.isInternal;
-    let contactUid: string | undefined;
-    const foundUser = await getUserByTelecomNumber(contact.phone);
-    if (foundUser) { isInternal = true; contactUid = foundUser.uid; }
-    await addContactToFirestore(authUid, {
-      contactUid, name: contact.name, phone: contact.phone,
-      isInternal, isFavorite: false, avatarColor: generateAvatarColor(),
-    });
-    await refreshData();
-  }, [authUid, refreshData]);
+    try {
+      let isInternal = contact.isInternal;
+      let contactUid: string | undefined;
+      const foundUser = await getUserByTelecomNumber(contact.phone);
+      if (foundUser) { isInternal = true; contactUid = foundUser.uid; }
+      await addContactToFirestore(authUid, {
+        contactUid, name: contact.name, phone: contact.phone,
+        isInternal, isFavorite: false, avatarColor: generateAvatarColor(),
+      });
+      await refreshData();
+      showToast({ message: 'Contact ajouté', variant: 'success' });
+    } catch (err) {
+      console.error(err);
+      showToast({ message: 'Impossible d’ajouter le contact', variant: 'error' });
+    }
+  }, [authUid, refreshData, showToast]);
 
   const deleteContact = useCallback(async (id: string) => {
     if (!authUid) return;
-    await deleteContactFromFirestore(authUid, id);
-    setContacts((prev) => prev.filter((c) => c.id !== id));
-  }, [authUid]);
+    try {
+      await deleteContactFromFirestore(authUid, id);
+      setContacts((prev) => prev.filter((c) => c.id !== id));
+      showToast({ message: 'Contact supprimé', variant: 'success' });
+    } catch (err) {
+      console.error(err);
+      showToast({ message: 'Suppression impossible', variant: 'error' });
+    }
+  }, [authUid, showToast]);
 
   const toggleFavorite = useCallback(async (id: string, currentValue: boolean) => {
     if (!authUid) return;
-    await toggleFavoriteInFirestore(authUid, id, !currentValue);
-    setContacts((prev) => prev.map((c) => (c.id === id ? { ...c, isFavorite: !c.isFavorite } : c)));
-  }, [authUid]);
+    const next = !currentValue;
+    try {
+      await toggleFavoriteInFirestore(authUid, id, next);
+      setContacts((prev) => prev.map((c) => (c.id === id ? { ...c, isFavorite: next } : c)));
+      showToast({
+        message: next ? 'Ajouté aux favoris' : 'Retiré des favoris',
+        variant: 'success',
+      });
+    } catch (err) {
+      console.error(err);
+      showToast({ message: 'Impossible de mettre à jour le favori', variant: 'error' });
+    }
+  }, [authUid, showToast]);
 
   const startCall = useCallback((contact: Contact) => {
     setCallState({ active: true, phase: 'ringing', contact, startTime: Date.now(), duration: 0, isInternal: contact.isInternal, direction: 'outgoing' });
@@ -302,6 +386,7 @@ export default function AppProvider({ children }: { children: ReactNode }) {
         contact.phone,
         contact.name
       ).then((ids) => {
+        internalCallPairRef.current = ids;
         setCurrentInternalCallIds(ids);
         setCurrentInternalCallRole('caller');
       }).catch((err) => console.error('Error initiating internal call:', err));
@@ -346,19 +431,34 @@ export default function AppProvider({ children }: { children: ReactNode }) {
   }, [user, authUid]);
 
   const answerIncomingCall = useCallback(async () => {
-    if (!currentInternalCallIds) return;
-    await answerInternalCallPair(currentInternalCallIds);
-    setCallState((prev) => prev.active ? { ...prev, phase: 'connected', startTime: Date.now() } : prev);
-  }, [currentInternalCallIds]);
+    const pair = internalCallPairRef.current;
+    if (!pair?.outgoingCallId || !pair?.incomingCallId) return;
+    try {
+      await answerInternalCallPair(pair);
+      setCallState((prev) => (prev.active ? { ...prev, phase: 'connected', startTime: Date.now() } : prev));
+      showToast({ message: 'Appel accepté', variant: 'success' });
+    } catch (err) {
+      console.error('answerIncomingCall', err);
+      showToast({ message: 'Impossible d’accepter l’appel', variant: 'error' });
+    }
+  }, [showToast]);
 
   const rejectIncomingCall = useCallback(async () => {
-    if (!currentInternalCallIds) return;
-    await rejectInternalCallPair(currentInternalCallIds);
-    setCallState({ active: false, phase: 'ended', contact: null, startTime: 0, duration: 0, isInternal: false, direction: 'outgoing' });
-    setCurrentInternalCallIds(null);
-    setCurrentInternalCallRole(null);
-    await refreshData();
-  }, [currentInternalCallIds, refreshData]);
+    const pair = internalCallPairRef.current;
+    if (!pair?.outgoingCallId || !pair?.incomingCallId) return;
+    try {
+      await rejectInternalCallPair(pair);
+      setCallState({ active: false, phase: 'ended', contact: null, startTime: 0, duration: 0, isInternal: false, direction: 'outgoing' });
+      setCurrentInternalCallIds(null);
+      setCurrentInternalCallRole(null);
+      internalCallPairRef.current = null;
+      await refreshData();
+      showToast({ message: 'Appel refusé', variant: 'info' });
+    } catch (err) {
+      console.error('rejectIncomingCall', err);
+      showToast({ message: 'Impossible de refuser l’appel', variant: 'error' });
+    }
+  }, [refreshData, showToast]);
 
   const endCall = useCallback(async () => {
     const currentState = callState;
@@ -369,6 +469,8 @@ export default function AppProvider({ children }: { children: ReactNode }) {
     const duration = currentState.phase === 'connected' ? Math.floor((Date.now() - currentState.startTime) / 1000) : 0;
     const cost = calculateCallCost(duration, currentState.isInternal, currentState.contact.phone);
     const finalStatus = currentState.phase === 'ringing' ? 'missed' : 'completed';
+    const wasRinging = currentState.phase === 'ringing';
+    const role = currentInternalCallRole;
     setCallState({ active: false, phase: 'ended', contact: null, startTime: 0, duration, isInternal: false });
     try {
       if (!authUid) throw new Error('Utilisateur non connecté');
@@ -439,12 +541,34 @@ export default function AppProvider({ children }: { children: ReactNode }) {
       }
       setCurrentInternalCallIds(null);
       setCurrentInternalCallRole(null);
+      internalCallPairRef.current = null;
       setExternalProviderSession(null);
       await refreshData();
-    } catch (err) { console.error('Error logging call:', err); }
-  }, [callState, user, authUid, refreshData, currentInternalCallIds, externalProviderSession]);
 
-  // Real-time incoming ringing calls for the callee
+      if (wasRinging && role === 'caller') {
+        showToast({ message: 'Appel annulé', variant: 'info' });
+      } else if (finalStatus === 'completed' && duration > 0) {
+        const timeLabel = formatDuration(duration);
+        if (currentState.isInternal) {
+          showToast({ message: `Appel BZT terminé · ${timeLabel}`, variant: 'success' });
+        } else if (cost > 0) {
+          showToast({
+            message: `Appel terminé · ${timeLabel} (est. ~$${cost.toFixed(2)})`,
+            variant: 'success',
+          });
+        } else {
+          showToast({ message: `Appel terminé · ${timeLabel}`, variant: 'success' });
+        }
+      } else if (finalStatus === 'completed') {
+        showToast({ message: 'Appel terminé', variant: 'success' });
+      }
+    } catch (err) {
+      console.error('Error logging call:', err);
+      showToast({ message: 'Erreur lors de l’enregistrement de l’appel', variant: 'error' });
+    }
+  }, [callState, user, authUid, refreshData, currentInternalCallIds, externalProviderSession, showToast]);
+
+  // Appels entrants internes (sonnerie) — ref pour ne pas ignorer un appel à cause d’une closure périmée
   useEffect(() => {
     if (!authUid || !user || user.status !== 'approved') return;
     const q = query(
@@ -455,10 +579,16 @@ export default function AppProvider({ children }: { children: ReactNode }) {
       where('status', '==', 'ringing')
     );
     const unsubscribe = onSnapshot(q, (snap) => {
-      if (snap.empty || callState.active) return;
-      const d = snap.docs[0].data();
+      if (snap.empty || callActiveRef.current) return;
+      const docSnap = snap.docs[0];
+      const d = docSnap.data();
+      const linkedOut = d.linkedCallId as string | undefined;
+      if (!linkedOut) {
+        console.error('[incoming call] linkedCallId manquant', docSnap.id);
+        return;
+      }
       const contact: Contact = {
-        id: `incoming-${snap.docs[0].id}`,
+        id: `incoming-${docSnap.id}`,
         contactUid: d.callerUserId,
         name: d.fromName || 'Appel entrant',
         phone: d.from || d.callerTelecomNumber,
@@ -467,16 +597,18 @@ export default function AppProvider({ children }: { children: ReactNode }) {
         isFavorite: false,
         addedAt: null,
       };
+      const pair = {
+        outgoingCallId: linkedOut,
+        incomingCallId: docSnap.id,
+        callSessionId: (d.callSessionId as string) || `sess-${docSnap.id}`,
+      };
+      internalCallPairRef.current = pair;
       setCallState({ active: true, phase: 'ringing', contact, startTime: Date.now(), duration: 0, isInternal: true, direction: 'incoming' });
-      setCurrentInternalCallIds({
-        outgoingCallId: d.linkedCallId || '',
-        incomingCallId: snap.docs[0].id,
-        callSessionId: d.callSessionId || `sess-${snap.docs[0].id}`,
-      });
+      setCurrentInternalCallIds(pair);
       setCurrentInternalCallRole('callee');
     });
     return () => unsubscribe();
-  }, [authUid, user, callState.active]);
+  }, [authUid, user?.status]);
 
   // Real-time sync for active internal call transitions.
   useEffect(() => {
@@ -497,6 +629,7 @@ export default function AppProvider({ children }: { children: ReactNode }) {
         setCallState((prev) => prev.active ? { ...prev, active: false, phase: 'ended' } : prev);
         setCurrentInternalCallIds(null);
         setCurrentInternalCallRole(null);
+        internalCallPairRef.current = null;
         void refreshData();
       }
     });
@@ -516,9 +649,16 @@ export default function AppProvider({ children }: { children: ReactNode }) {
   const rechargeCredit = useCallback(async (amount: number) => {
     if (!authUid) return;
     if (amount <= 0) return;
-    await performRecharge(authUid, amount, 'Recharge manuelle utilisateur');
-    await refreshData();
-  }, [authUid, refreshData]);
+    try {
+      await performRecharge(authUid, amount, 'Recharge manuelle utilisateur');
+      await refreshData();
+      showToast({ message: `Recharge de $${amount.toFixed(2)} enregistrée`, variant: 'success' });
+    } catch (err) {
+      console.error(err);
+      const msg = err instanceof Error ? err.message : 'Recharge impossible';
+      showToast({ message: msg, variant: 'error' });
+    }
+  }, [authUid, refreshData, showToast]);
 
   const logout = useCallback(async () => {
     setUser(null);
@@ -534,6 +674,7 @@ export default function AppProvider({ children }: { children: ReactNode }) {
   const noopCall = useCallback((_c: Contact) => {}, []);
   const noopEnd = useCallback(() => {}, []);
   const noopRecharge = useCallback(async (_n: number) => {}, []);
+  const noopToast = useCallback((_opts: { message: string; variant?: 'success' | 'error' | 'info' }) => {}, []);
 
   const isReady = user && user.status === 'approved';
 
@@ -550,18 +691,14 @@ export default function AppProvider({ children }: { children: ReactNode }) {
     rechargeCredit: isReady ? rechargeCredit : noopRecharge,
     refreshData: isReady ? refreshData : noopAsync,
     logout,
+    showToast: isReady ? showToast : noopToast,
   };
 
   // ── Loading Screen ──
   if (loading) {
     return (
       <AppContext.Provider value={contextValue}>
-        <div style={{ height: '100dvh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#060b18' }}>
-          <div style={{ textAlign: 'center' }}>
-            <BizaflowLogo size={66} />
-            <div style={{ color: '#4a5e7a', fontSize: '0.75rem', marginTop: 8 }}>Chargement...</div>
-          </div>
-        </div>
+        <LoadingShell />
       </AppContext.Provider>
     );
   }
@@ -598,6 +735,7 @@ export default function AppProvider({ children }: { children: ReactNode }) {
   return (
     <AppContext.Provider value={contextValue}>
       {children}
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </AppContext.Provider>
   );
 }

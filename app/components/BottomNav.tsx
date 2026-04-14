@@ -40,7 +40,14 @@ export default function BottomNav() {
       {tabs.map((tab) => {
         const isActive = tab.href === '/' ? pathname === '/' : pathname.startsWith(tab.href);
         return (
-          <Link key={tab.id} href={tab.href} className={`nav-item ${isActive ? 'active' : ''}`} id={`nav-${tab.id}`}>
+          <Link
+            key={tab.id}
+            href={tab.href}
+            className={`nav-item ${isActive ? 'active' : ''}`}
+            id={`nav-${tab.id}`}
+            aria-current={isActive ? 'page' : undefined}
+            prefetch
+          >
             {tab.icon}
             <span>{tab.label}</span>
           </Link>
@@ -48,7 +55,7 @@ export default function BottomNav() {
       })}
 
       {user?.role === 'ceo' && (
-        <Link href="/ceo" className="nav-item" id="nav-ceo" style={{ color: '#ef4444' }}>
+        <Link href="/ceo" className="nav-item" id="nav-ceo" style={{ color: '#ef4444' }} prefetch>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="nav-icon">
             <path d="M12 15l-2-5-2 5h4z" />
             <path d="M12 2L2 7l10 5 10-5-10-5z" />

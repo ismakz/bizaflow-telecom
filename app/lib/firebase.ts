@@ -5,6 +5,7 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
+import { isFirebasePublicConfigComplete } from '@/app/lib/env';
 
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -15,13 +16,14 @@ const firebaseConfig = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
 
-// Debug: verify env variables are loaded (remove after fixing)
-if (typeof window !== 'undefined') {
-  console.log('[Firebase Config]', {
-    apiKey: firebaseConfig.apiKey ? `${firebaseConfig.apiKey.slice(0, 10)}...` : '❌ UNDEFINED',
-    authDomain: firebaseConfig.authDomain || '❌ UNDEFINED',
-    projectId: firebaseConfig.projectId || '❌ UNDEFINED',
-  });
+if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
+  if (!isFirebasePublicConfigComplete()) {
+    console.warn(
+      '[Firebase] Variables NEXT_PUBLIC_FIREBASE_* incomplètes. Vérifiez .env.local (voir README).'
+    );
+  } else {
+    console.log('[Firebase] Config OK — projet:', firebaseConfig.projectId);
+  }
 }
 
 // Initialize Firebase (prevent duplicate initialization)

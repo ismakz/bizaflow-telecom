@@ -10,7 +10,7 @@ interface TransferModalProps {
 }
 
 export default function TransferModal({ isOpen, onClose }: TransferModalProps) {
-  const { user, contacts, refreshData } = useApp();
+  const { user, contacts, refreshData, showToast } = useApp();
   const [step, setStep] = useState<'input' | 'confirm' | 'success'>('input');
   const [targetBZT, setTargetBZT] = useState('');
   const [amount, setAmount] = useState('');
@@ -75,6 +75,10 @@ export default function TransferModal({ isOpen, onClose }: TransferModalProps) {
         user.name, targetName
       );
       await refreshData();
+      showToast({
+        message: `Transfert de $${value.toFixed(2)} envoyé à ${targetName}`,
+        variant: 'success',
+      });
       setStep('success');
       setTimeout(() => { setStep('input'); setAmount(''); setTargetBZT(''); setTargetName(''); setTargetUid(''); onClose(); }, 2500);
     } catch (err: unknown) {

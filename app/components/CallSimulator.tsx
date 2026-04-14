@@ -9,6 +9,13 @@ import { getProviderRuntimeInfo } from '@/app/lib/voiceProvider';
 export default function CallSimulator() {
   const { callState, endCall, user, answerIncomingCall, rejectIncomingCall } = useApp();
   const [elapsed, setElapsed] = useState(0);
+  const [incomingAction, setIncomingAction] = useState<'idle' | 'answering' | 'rejecting'>('idle');
+
+  const incomingRinging = callState.phase === 'ringing' && callState.direction === 'incoming' && callState.isInternal;
+
+  useEffect(() => {
+    if (!incomingRinging) setIncomingAction('idle');
+  }, [incomingRinging]);
 
   useEffect(() => {
     if (!callState.active || callState.phase !== 'connected') return;
@@ -105,42 +112,62 @@ export default function CallSimulator() {
               ))}
             </div>
             {callState.direction === 'incoming' && (
-              <div style={{ marginTop: 16, display: 'flex', gap: 10, justifyContent: 'center' }}>
-                <button
-                  onClick={answerIncomingCall}
-                  style={{
-                    padding: '10px 18px',
-                    borderRadius: 999,
-                    background: 'linear-gradient(135deg, #10b981, #059669)',
-                    color: 'white',
-                    border: 'none',
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Décrocher
-                </button>
-                <button
-                  onClick={rejectIncomingCall}
-                  style={{
-                    padding: '10px 18px',
-                    borderRadius: 999,
-                    background: 'linear-gradient(135deg, #ef4444, #dc2626)',
-                    color: 'white',
-                    border: 'none',
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Refuser
-                </button>
+              <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+                <div style={{ fontSize: '0.7rem', color: '#94a3b8', maxWidth: 280, textAlign: 'center', lineHeight: 1.4 }}>
+                  Choisissez d’accepter ou de refuser l’appel.
+                </div>
+                <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    disabled={incomingAction !== 'idle'}
+                    onClick={() => {
+                      setIncomingAction('answering');
+                      void answerIncomingCall().finally(() => setIncomingAction('idle'));
+                    }}
+                    style={{
+                      padding: '12px 22px',
+                      borderRadius: 999,
+                      background: 'linear-gradient(135deg, #10b981, #059669)',
+                      color: 'white',
+                      border: 'none',
+                      fontWeight: 700,
+                      cursor: incomingAction !== 'idle' ? 'wait' : 'pointer',
+                      opacity: incomingAction !== 'idle' && incomingAction !== 'answering' ? 0.5 : 1,
+                    }}
+                  >
+                    {incomingAction === 'answering' ? 'Connexion…' : 'Accepter'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={incomingAction !== 'idle'}
+                    onClick={() => {
+                      setIncomingAction('rejecting');
+                      void rejectIncomingCall().finally(() => setIncomingAction('idle'));
+                    }}
+                    style={{
+                      padding: '12px 22px',
+                      borderRadius: 999,
+                      background: 'linear-gradient(135deg, #ef4444, #dc2626)',
+                      color: 'white',
+                      border: 'none',
+                      fontWeight: 700,
+                      cursor: incomingAction !== 'idle' ? 'wait' : 'pointer',
+                      opacity: incomingAction !== 'idle' && incomingAction !== 'rejecting' ? 0.5 : 1,
+                    }}
+                  >
+                    {incomingAction === 'rejecting' ? 'Refus…' : 'Refuser'}
+                  </button>
+                </div>
+                <div style={{ fontSize: '0.65rem', color: '#64748b' }}>
+                  Accepter = décrocher • Refuser = raccrocher sans répondre
+                </div>
               </div>
             )}
           </div>
         ) : (
           <div>
             <div style={{ fontSize: '0.75rem', color: '#10b981', marginBottom: 8 }}>
-              answered
+              En communication
             </div>
             <div style={{
               fontSize: '3rem', fontWeight: 200, color: '#e2e8f0',
@@ -199,28 +226,31 @@ export default function CallSimulator() {
         )}
       </div>
 
-      {/* End Call Button */}
-      <div style={{ position: 'relative', zIndex: 1 }}>
-        <button
-          onClick={endCall}
-          style={{
-            width: 72, height: 72, borderRadius: '50%',
-            background: 'linear-gradient(135deg, #ef4444, #dc2626)',
-            border: 'none', cursor: 'pointer',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: '0 8px 32px rgba(239, 68, 68, 0.35)',
-            transition: 'transform 0.2s',
-          }}
-          id="end-call-button"
-        >
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="white">
-            <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.956.956 0 010-1.36C3.69 8.41 7.62 6.5 12 6.5s8.31 1.91 11.71 5.22c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.1-.7-.28-.79-.73-1.68-1.36-2.66-1.85a.991.991 0 01-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z" />
-          </svg>
-        </button>
-        <div style={{ textAlign: 'center', marginTop: 10, fontSize: '0.7rem', color: '#f87171', fontWeight: 500 }}>
-          {callState.phase === 'ringing' && callState.direction === 'outgoing' ? 'Annuler' : 'Raccrocher'}
+      {/* Raccrocher / Annuler : pendant la sonnerie entrante, seuls Accepter / Refuser s’affichent plus haut */}
+      {!incomingRinging && (
+        <div style={{ position: 'relative', zIndex: 1 }}>
+          <button
+            type="button"
+            onClick={endCall}
+            style={{
+              width: 72, height: 72, borderRadius: '50%',
+              background: 'linear-gradient(135deg, #ef4444, #dc2626)',
+              border: 'none', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              boxShadow: '0 8px 32px rgba(239, 68, 68, 0.35)',
+              transition: 'transform 0.2s',
+            }}
+            id="end-call-button"
+          >
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="white">
+              <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.956.956 0 010-1.36C3.69 8.41 7.62 6.5 12 6.5s8.31 1.91 11.71 5.22c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.1-.7-.28-.79-.73-1.68-1.36-2.66-1.85a.991.991 0 01-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z" />
+            </svg>
+          </button>
+          <div style={{ textAlign: 'center', marginTop: 10, fontSize: '0.7rem', color: '#f87171', fontWeight: 500 }}>
+            {callState.phase === 'ringing' && callState.direction === 'outgoing' ? 'Annuler' : 'Raccrocher'}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

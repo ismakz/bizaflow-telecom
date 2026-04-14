@@ -6,10 +6,8 @@ import { isBZTNumber, getInitials, detectOperator, CALL_RATES, normalizeExternal
 import { getUserByTelecomNumber } from '@/app/lib/firestore';
 import type { Contact } from '@/app/lib/types';
 import type { OperatorId } from '@/app/lib/utils';
-import CallSimulator from '@/app/components/CallSimulator';
-
 export default function DialerPage() {
-  const { user, contacts, startCall, callState, estimateExternalCallCost } = useApp();
+  const { user, contacts, startCall, estimateExternalCallCost } = useApp();
   const [input, setInput] = useState('');
   const [searching, setSearching] = useState(false);
   const [estimatedCost, setEstimatedCost] = useState(0);
@@ -143,8 +141,6 @@ export default function DialerPage() {
 
   return (
     <div className="page-container" style={{ paddingBottom: 90, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-      {callState.active && <CallSimulator />}
-
       {/* Header */}
       <div style={{ width: '100%', textAlign: 'center', marginBottom: 12 }}>
         <h1 style={{ fontSize: '1.1rem', fontWeight: 800, margin: 0 }}>
