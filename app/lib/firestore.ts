@@ -940,6 +940,9 @@ function isValidExternalPhoneNumber(targetNumber: string): boolean {
 }
 
 function resolveExternalRate(config: TelecomCallRateConfigDoc | undefined, operatorId: keyof typeof CALL_RATES): number {
+  if (operatorId === 'internal') {
+    return CALL_RATES.internal;
+  }
   if (!config) return CALL_RATES[operatorId];
   const configuredRate = config[operatorId];
   if (typeof configuredRate === 'number' && configuredRate >= 0) return configuredRate;
