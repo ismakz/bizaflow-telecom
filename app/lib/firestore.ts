@@ -17,7 +17,7 @@ import {
   serverTimestamp,
   increment,
   runTransaction,
-  type Timestamp,
+  Timestamp,
 } from 'firebase/firestore';
 import { db } from './firebase';
 import type { UserRole, UserStatus, SystemStats } from './types';
