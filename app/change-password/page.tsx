@@ -1,11 +1,13 @@
 'use client';
 
 import { useState } from 'react';
-import { updatePassword } from 'firebase/auth';
+import { useRouter } from 'next/navigation';
+import { signOut, updatePassword } from 'firebase/auth';
 import { auth } from '@/app/lib/firebase';
 import { clearMustChangePassword } from '@/app/lib/firestore';
 
 export default function ChangePasswordPage() {
+  const router = useRouter();
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
@@ -38,6 +40,8 @@ export default function ChangePasswordPage() {
       const msg = err instanceof Error ? err.message : 'Erreur inconnue';
       if (msg.includes('requires-recent-login')) {
         setError('Veuillez vous reconnecter avant de changer le mot de passe');
+        await signOut(auth);
+        router.replace('/login?reason=recent-login');
       } else {
         setError(msg);
       }

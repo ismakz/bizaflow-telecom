@@ -25,11 +25,23 @@ export default function DialerPage() {
   const rate = operator ? CALL_RATES[operator.id as OperatorId] : 0;
 
   useEffect(() => {
-    if (!input.trim() || isBZTNumber(input)) {
-      setEstimatedCost(0);
-      return;
-    }
-    void estimateExternalCallCost(input, 1).then(setEstimatedCost).catch(() => setEstimatedCost(0));
+    let cancelled = false;
+    const updateEstimate = async () => {
+      if (!input.trim() || isBZTNumber(input)) {
+        if (!cancelled) setEstimatedCost(0);
+        return;
+      }
+      try {
+        const cost = await estimateExternalCallCost(input, 1);
+        if (!cancelled) setEstimatedCost(cost);
+      } catch {
+        if (!cancelled) setEstimatedCost(0);
+      }
+    };
+    void updateEstimate();
+    return () => {
+      cancelled = true;
+    };
   }, [input, estimateExternalCallCost]);
 
   const matchedContacts = useMemo(() => {

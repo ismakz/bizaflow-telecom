@@ -13,21 +13,22 @@ const typeLabels: Record<string, string> = {
   pack_purchase: '📦 Pack', bonus: '🎁 Bonus', call_charge: '📞 Appel', refund: '↩️ Remb.',
 };
 
+function getGreeting() {
+  const hour = new Date().getHours();
+  if (hour < 12) return 'Bonjour';
+  if (hour < 18) return 'Bon après-midi';
+  return 'Bonsoir';
+}
+
 export default function DashboardPage() {
-  const { user, contacts, calls, loading } = useApp();
-  const [greeting, setGreeting] = useState('Bonjour');
+  const { user, calls, loading } = useApp();
+  const [recentThreshold] = useState(() => Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const [greeting] = useState(getGreeting);
   const [copied, setCopied] = useState(false);
   const [showRecharge, setShowRecharge] = useState(false);
   const [showTransfer, setShowTransfer] = useState(false);
   const [recentTxs, setRecentTxs] = useState<TelecomTransactionDoc[]>([]);
   const [activePack, setActivePack] = useState<TelecomUserPackDoc | null>(null);
-
-  useEffect(() => {
-    const hour = new Date().getHours();
-    if (hour < 12) setGreeting('Bonjour');
-    else if (hour < 18) setGreeting('Bon après-midi');
-    else setGreeting('Bonsoir');
-  }, []);
 
   useEffect(() => {
     if (!user) return;
@@ -53,12 +54,11 @@ export default function DashboardPage() {
 
   const recentCalls = calls.filter((c) => {
     if (!c.createdAt) return false;
-    return Date.now() - new Date(c.createdAt).getTime() < 7 * 24 * 60 * 60 * 1000;
+    return new Date(c.createdAt).getTime() >= recentThreshold;
   });
   const internalCalls = recentCalls.filter((c) => c.type === 'internal_call').length;
   const externalCalls = recentCalls.filter((c) => c.type === 'external_call').length;
   const totalSpent = calls.reduce((sum, c) => sum + c.cost, 0);
-  const internalContacts = contacts.filter((c) => c.isInternal).length;
 
   const quickActions = [
     { label: 'Appeler', href: '/dialer', icon: '📞', color: '#06b6d4', bg: 'rgba(6, 182, 212, 0.1)', border: 'rgba(6, 182, 212, 0.2)' },

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { signUp, signIn } from '@/app/lib/auth';
 import { getTelecomUser } from '@/app/lib/firestore';
 import { auth } from '@/app/lib/firebase';
@@ -9,13 +9,18 @@ import BizaflowLogo from '@/app/components/BizaflowLogo';
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [statusMessage, setStatusMessage] = useState('');
+  const [statusMessage, setStatusMessage] = useState(
+    searchParams.get('reason') === 'recent-login'
+      ? 'Reconnectez-vous pour confirmer le changement de mot de passe.'
+      : ''
+  );
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

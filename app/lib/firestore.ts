@@ -805,6 +805,50 @@ export async function performRecharge(uid: string, amount: number, description: 
 }
 
 /**
+ * Perform a CEO recharge for another user (atomic: update balance + audit transaction)
+ */
+export async function performAdminRecharge(
+  targetUid: string,
+  amount: number,
+  ceoUid: string,
+  description: string,
+): Promise<void> {
+  if (!targetUid) throw new Error('Utilisateur invalide');
+  if (!ceoUid) throw new Error('CEO invalide');
+  if (amount <= 0 || Number.isNaN(amount)) throw new Error('Montant invalide');
+
+  const roundedAmount = Math.round(amount * 100) / 100;
+
+  await runTransaction(db, async (transaction) => {
+    const userRef = doc(db, 'telecom_users', targetUid);
+    const userSnap = await transaction.get(userRef);
+
+    if (!userSnap.exists()) throw new Error('Utilisateur introuvable');
+    const userData = userSnap.data();
+    const balanceBefore = userData.balance || 0;
+    const balanceAfter = Math.round((balanceBefore + roundedAmount) * 100) / 100;
+
+    transaction.update(userRef, { balance: balanceAfter });
+
+    const txRef = doc(collection(db, 'telecom_transactions'));
+    transaction.set(txRef, {
+      userId: targetUid,
+      type: 'admin_recharge',
+      amount: roundedAmount,
+      currency: 'USD',
+      status: 'success',
+      description,
+      balanceBefore,
+      balanceAfter,
+      createdAt: serverTimestamp(),
+      createdBy: ceoUid,
+      targetUserId: targetUid,
+      targetTelecomNumber: userData.telecomNumber || null,
+    });
+  });
+}
+
+/**
  * Perform a transfer (atomic: debit source + credit target + 2 transactions)
  */
 export async function performTransfer(

@@ -73,7 +73,10 @@ function isStatusPage(path: string) { return STATUS_PAGES.includes(path); }
 function isCEOPage(path: string) { return path === '/ceo' || path.startsWith('/ceo/'); }
 
 function getTargetRoute(userData: User, currentPath: string): string | null {
-  if (userData.mustChangePassword && currentPath !== '/change-password') return '/change-password';
+  if (userData.mustChangePassword) {
+    return currentPath === '/change-password' ? null : '/change-password';
+  }
+
   if (userData.status === 'pending' && currentPath !== '/pending') return '/pending';
   if (userData.status === 'rejected' && currentPath !== '/rejected') return '/rejected';
   if (userData.status === 'suspended' && currentPath !== '/suspended') return '/suspended';
@@ -566,7 +569,7 @@ export default function AppProvider({ children }: { children: ReactNode }) {
       console.error('Error logging call:', err);
       showToast({ message: 'Erreur lors de l’enregistrement de l’appel', variant: 'error' });
     }
-  }, [callState, user, authUid, refreshData, currentInternalCallIds, externalProviderSession, showToast]);
+  }, [callState, user, authUid, refreshData, currentInternalCallIds, currentInternalCallRole, externalProviderSession, showToast]);
 
   // Appels entrants internes (sonnerie) — ref pour ne pas ignorer un appel à cause d’une closure périmée
   useEffect(() => {
@@ -608,7 +611,7 @@ export default function AppProvider({ children }: { children: ReactNode }) {
       setCurrentInternalCallRole('callee');
     });
     return () => unsubscribe();
-  }, [authUid, user?.status]);
+  }, [authUid, user]);
 
   // Real-time sync for active internal call transitions.
   useEffect(() => {

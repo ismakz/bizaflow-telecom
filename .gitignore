@@ -40,3 +40,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+.vercel
+.env*.local
+
+# local prototypes kept outside Bizaflow Telecom production scope
+app/antigravity/
+app/components/AntigravityMobileTool.tsx

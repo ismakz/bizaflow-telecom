@@ -17,7 +17,7 @@ const FILTERS: { label: string; value: FilterType }[] = [
 ];
 
 export default function HistoryPage() {
-  const { calls, user } = useApp();
+  const { calls } = useApp();
   const [filter, setFilter] = useState<FilterType>('all');
 
   const filtered = useMemo(() => {

@@ -1,11 +1,10 @@
 'use client';
 
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useApp } from '@/app/components/AppProvider';
 import PackCard from '@/app/components/PackCard';
 import { formatBalance } from '@/app/lib/utils';
 import { getAvailablePacks, getActiveUserPack, getUserPackHistory, purchaseTelecomPack, type TelecomPackDoc, type TelecomUserPackDoc } from '@/app/lib/firestore';
-import { useEffect } from 'react';
 
 export default function CreditPage() {
   const { user, rechargeCredit, refreshData } = useApp();
@@ -18,7 +17,7 @@ export default function CreditPage() {
   const [activePack, setActivePack] = useState<TelecomUserPackDoc | null>(null);
   const [packHistory, setPackHistory] = useState<TelecomUserPackDoc[]>([]);
 
-  const loadPackData = async () => {
+  const loadPackData = useCallback(async () => {
     if (!user) return;
     const [available, active, history] = await Promise.all([
       getAvailablePacks(),
@@ -28,11 +27,11 @@ export default function CreditPage() {
     setPacks(available);
     setActivePack(active);
     setPackHistory(history.slice(0, 5));
-  };
+  }, [user]);
 
   useEffect(() => {
     void loadPackData();
-  }, [user]);
+  }, [loadPackData]);
 
   const handleRecharge = async () => {
     const amount = parseFloat(rechargeAmount);

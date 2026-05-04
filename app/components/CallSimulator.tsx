@@ -14,7 +14,9 @@ export default function CallSimulator() {
   const incomingRinging = callState.phase === 'ringing' && callState.direction === 'incoming' && callState.isInternal;
 
   useEffect(() => {
-    if (!incomingRinging) setIncomingAction('idle');
+    if (incomingRinging) return;
+    const timeout = window.setTimeout(() => setIncomingAction('idle'), 0);
+    return () => window.clearTimeout(timeout);
   }, [incomingRinging]);
 
   useEffect(() => {

@@ -1,24 +1,30 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useSyncExternalStore } from 'react';
+
+function subscribeToNetworkStatus(callback: () => void) {
+  window.addEventListener('online', callback);
+  window.addEventListener('offline', callback);
+
+  return () => {
+    window.removeEventListener('online', callback);
+    window.removeEventListener('offline', callback);
+  };
+}
+
+function getNetworkStatus() {
+  return navigator.onLine;
+}
+
+function getServerNetworkStatus() {
+  return true;
+}
 
 /**
  * Bandeau discret si la connexion réseau est perdue (PWA / mobile).
  */
 export default function NetworkBanner() {
-  const [online, setOnline] = useState(true);
-
-  useEffect(() => {
-    setOnline(typeof navigator !== 'undefined' ? navigator.onLine : true);
-    const on = () => setOnline(true);
-    const off = () => setOnline(false);
-    window.addEventListener('online', on);
-    window.addEventListener('offline', off);
-    return () => {
-      window.removeEventListener('online', on);
-      window.removeEventListener('offline', off);
-    };
-  }, []);
+  const online = useSyncExternalStore(subscribeToNetworkStatus, getNetworkStatus, getServerNetworkStatus);
 
   if (online) return null;
 
