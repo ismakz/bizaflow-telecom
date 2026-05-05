@@ -3,8 +3,16 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useApp } from '@/app/components/AppProvider';
-import { getPackAnalytics, getSystemStats, getUsersByStatus, type PackAnalytics, type TelecomUserDoc } from '@/app/lib/firestore';
-import { formatRelativeTime, timestampToISO } from '@/app/lib/utils';
+import {
+  getInternalCommunicationStats,
+  getPackAnalytics,
+  getSystemStats,
+  getUsersByStatus,
+  type InternalCommunicationStats,
+  type PackAnalytics,
+  type TelecomUserDoc,
+} from '@/app/lib/firestore';
+import { formatDuration, formatRelativeTime, timestampToISO } from '@/app/lib/utils';
 import type { SystemStats } from '@/app/lib/types';
 
 const cardBase = {
@@ -19,6 +27,7 @@ export default function CEODashboard() {
   const [stats, setStats] = useState<SystemStats | null>(null);
   const [recentPending, setRecentPending] = useState<TelecomUserDoc[]>([]);
   const [packAnalytics, setPackAnalytics] = useState<PackAnalytics>({ topPacks: [], topSubscribers: [] });
+  const [internalStats, setInternalStats] = useState<InternalCommunicationStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -31,14 +40,16 @@ export default function CEODashboard() {
     setLoading(true);
     setError('');
     try {
-      const [systemStats, pending, packData] = await Promise.all([
+      const [systemStats, pending, packData, internalData] = await Promise.all([
         getSystemStats(),
         getUsersByStatus('pending'),
         getPackAnalytics(),
+        getInternalCommunicationStats(),
       ]);
       setStats(systemStats);
       setRecentPending(pending.slice(0, 5));
       setPackAnalytics(packData);
+      setInternalStats(internalData);
     } catch (err) {
       console.error('Error loading CEO dashboard:', err);
       setError('Impossible de charger le dashboard CEO.');
@@ -183,6 +194,31 @@ export default function CEODashboard() {
         )}
       </div>
 
+      {internalStats && (
+        <div style={{ ...cardBase, marginTop: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+            <h2 style={{ fontSize: '1rem', fontWeight: 800, margin: 0 }}>Communication interne</h2>
+            <span style={{ color: '#06b6d4', fontSize: '0.7rem', fontWeight: 800 }}>BZT vers BZT</span>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10 }}>
+            <MiniMetric label="Messages" value={internalStats.totalMessages} color="#06b6d4" />
+            <MiniMetric label="Appels aujourd'hui" value={internalStats.internalCallsToday} color="#10b981" />
+            <MiniMetric label="Manqués" value={internalStats.missedInternalCalls} color="#ef4444" />
+            <MiniMetric label="Durée moyenne" value={formatDuration(internalStats.averageCallDurationSeconds)} color="#f59e0b" />
+            <MiniMetric label="Taux échec" value={`${internalStats.failureRatePercent}%`} color="#8b5cf6" />
+          </div>
+          {internalStats.mostActiveUsers.length > 0 && (
+            <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {internalStats.mostActiveUsers.map((item) => (
+                <span key={item.userId} style={{ padding: '6px 8px', borderRadius: 8, background: 'rgba(6,182,212,0.08)', border: '1px solid rgba(6,182,212,0.15)', color: '#8bdff0', fontSize: '0.72rem' }}>
+                  {item.userId.slice(0, 6)} · {item.count}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
         <div style={cardBase}>
           <div style={{ fontWeight: 700, marginBottom: 8 }}>Top packs</div>
@@ -205,6 +241,15 @@ export default function CEODashboard() {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+function MiniMetric({ label, value, color }: { label: string; value: string | number; color: string }) {
+  return (
+    <div style={{ padding: 12, borderRadius: 10, background: 'rgba(255,255,255,0.025)', border: '1px solid rgba(255,255,255,0.05)' }}>
+      <div style={{ color: '#64748b', fontSize: '0.64rem', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>{label}</div>
+      <div style={{ color, fontWeight: 900, fontSize: '1.15rem' }}>{value}</div>
     </div>
   );
 }

@@ -129,6 +129,15 @@ export interface PackAnalytics {
   topSubscribers: Array<{ userId: string; telecomNumber: string; count: number }>;
 }
 
+export interface InternalCommunicationStats {
+  totalMessages: number;
+  internalCallsToday: number;
+  missedInternalCalls: number;
+  averageCallDurationSeconds: number;
+  mostActiveUsers: Array<{ userId: string; count: number }>;
+  failureRatePercent: number;
+}
+
 export interface InternalCallPair {
   outgoingCallId: string;
   incomingCallId: string;
@@ -653,6 +662,57 @@ export async function getPackAnalytics(): Promise<PackAnalytics> {
     .slice(0, 5);
 
   return { topPacks, topSubscribers };
+}
+
+export async function getInternalCommunicationStats(): Promise<InternalCommunicationStats> {
+  const [messagesSnap, callsSnap] = await Promise.all([
+    getDocs(collection(db, 'telecom_messages')),
+    getDocs(collection(db, 'telecom_internal_calls')),
+  ]);
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todaySeconds = Math.floor(today.getTime() / 1000);
+  const activeByUser: Record<string, number> = {};
+  let internalCallsToday = 0;
+  let missedInternalCalls = 0;
+  let failedOrMissed = 0;
+  let completed = 0;
+  let totalDuration = 0;
+
+  messagesSnap.docs.forEach((messageDoc) => {
+    const data = messageDoc.data();
+    if (data.senderId) activeByUser[data.senderId] = (activeByUser[data.senderId] || 0) + 1;
+  });
+
+  callsSnap.docs.forEach((callDoc) => {
+    const data = callDoc.data();
+    if (data.callerId) activeByUser[data.callerId] = (activeByUser[data.callerId] || 0) + 1;
+    if (data.receiverId) activeByUser[data.receiverId] = (activeByUser[data.receiverId] || 0) + 1;
+
+    const createdSeconds = data.createdAt?.seconds || 0;
+    if (createdSeconds >= todaySeconds) internalCallsToday++;
+    if (data.status === 'missed') missedInternalCalls++;
+    if (['missed', 'failed', 'declined'].includes(data.status)) failedOrMissed++;
+    if (data.status === 'completed') {
+      completed++;
+      totalDuration += Number(data.durationSeconds || 0);
+    }
+  });
+
+  const totalCalls = callsSnap.size;
+
+  return {
+    totalMessages: messagesSnap.size,
+    internalCallsToday,
+    missedInternalCalls,
+    averageCallDurationSeconds: completed > 0 ? Math.round(totalDuration / completed) : 0,
+    mostActiveUsers: Object.entries(activeByUser)
+      .map(([userId, count]) => ({ userId, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5),
+    failureRatePercent: totalCalls > 0 ? Math.round((failedOrMissed / totalCalls) * 100) : 0,
+  };
 }
 
 // =============================================

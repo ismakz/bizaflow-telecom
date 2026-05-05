@@ -12,6 +12,18 @@
   --font-mono: var(--font-geist-mono);
 }
 
+.internal-telecom-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  gap: 12px;
+}
+
+@media (max-width: 820px) {
+  .internal-telecom-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 :root {
   /* ── Core Colors ── */
   --background: #060b18;
