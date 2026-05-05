@@ -22,6 +22,8 @@ import {
   type TelecomInternalCall,
   type TelecomMessage,
 } from '@/app/lib/internalTelecom';
+import { auth } from '@/app/lib/firebase';
+import { onForegroundPushMessage, registerPushToken } from '@/app/lib/pushNotifications';
 import { formatDuration, formatTime, getInitials } from '@/app/lib/utils';
 
 const statusLabels = {
@@ -56,6 +58,7 @@ export default function InternalTelecomPage() {
   const [search, setSearch] = useState('');
   const [activeCall, setActiveCall] = useState<TelecomInternalCall | null>(null);
   const [callNotice, setCallNotice] = useState('');
+  const [notificationStatus, setNotificationStatus] = useState('');
   const [sending, setSending] = useState(false);
 
   const selectedContact = useMemo(
@@ -76,6 +79,31 @@ export default function InternalTelecomPage() {
       void touchUserPresence(user.uid, 'offline');
     };
   }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    void registerPushToken(user.uid).then((result) => {
+      if (result.ok) {
+        setNotificationStatus('Notifications activées pour les appels entrants.');
+      } else if (result.reason === 'VAPID_KEY_NOT_CONFIGURED') {
+        setNotificationStatus('Push non configuré: ajoutez NEXT_PUBLIC_FIREBASE_VAPID_KEY pour les appels app fermée.');
+      } else {
+        setNotificationStatus('Activez les notifications pour recevoir les appels même lorsque l’application est fermée.');
+      }
+    });
+  }, [user]);
+
+  useEffect(() => {
+    let unsubscribe = () => {};
+    void onForegroundPushMessage((payload) => {
+      setCallNotice(payload.body || 'Appel entrant');
+      void playIncomingRing();
+      vibrateIncomingCall();
+    }).then((unsub) => {
+      unsubscribe = unsub;
+    });
+    return () => unsubscribe();
+  }, []);
 
   useEffect(() => {
     if (!user) return;
@@ -110,6 +138,8 @@ export default function InternalTelecomPage() {
     if (!incomingCalls[0]) return;
     setActiveCall(incomingCalls[0]);
     setCallNotice(`${incomingCalls[0].callerName} vous appelle`);
+    void playIncomingRing();
+    vibrateIncomingCall();
   }, [incomingCalls]);
 
   useEffect(() => {
@@ -118,6 +148,7 @@ export default function InternalTelecomPage() {
       void markInternalCallMissed(activeCall);
       setCallNotice('Appel manqué');
       setActiveCall(null);
+      stopIncomingRing();
     }, 30_000);
     return () => window.clearTimeout(timer);
   }, [activeCall]);
@@ -178,6 +209,7 @@ export default function InternalTelecomPage() {
         receiverName: selectedContact.name,
       });
       setCallNotice('Appel lancé. Session audio interne prête pour WebRTC.');
+      await sendIncomingCallPush(callId);
       setActiveCall({
         id: callId,
         callerId: user.uid,
@@ -203,6 +235,7 @@ export default function InternalTelecomPage() {
     try {
       await acceptInternalCall(activeCall, user.uid);
       setActiveCall({ ...activeCall, status: 'accepted' });
+      stopIncomingRing();
       setCallNotice('Appel accepté. WebRTC prêt avec STUN public; TURN sera ajouté à la prochaine étape.');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Acceptation impossible';
@@ -216,6 +249,7 @@ export default function InternalTelecomPage() {
       await declineInternalCall(activeCall, user.uid);
       setCallNotice('Appel refusé');
       setActiveCall(null);
+      stopIncomingRing();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Refus impossible';
       showToast({ message: explainError(message), variant: 'error' });
@@ -228,6 +262,7 @@ export default function InternalTelecomPage() {
       await endInternalCall(activeCall, user.uid);
       setCallNotice('Appel terminé');
       setActiveCall(null);
+      stopIncomingRing();
       void touchUserPresence(user.uid, 'online');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Fin appel impossible';
@@ -266,6 +301,9 @@ export default function InternalTelecomPage() {
               Les appels internes n’utilisent pas Telnyx/Twilio.
             </div>
           </div>
+          {activeCall?.status === 'ringing' && (
+            <button onClick={stopIncomingRing} style={secondaryButtonStyle}>Couper</button>
+          )}
           {activeCall?.status === 'ringing' && activeCall.receiverId === user.uid && (
             <>
               <button onClick={acceptCall} className="btn-primary" style={{ width: 'auto', padding: '9px 12px' }}>Accepter</button>
@@ -275,6 +313,12 @@ export default function InternalTelecomPage() {
           {activeCall && activeCall.status !== 'ringing' && (
             <button onClick={endCall} style={dangerButtonStyle}>Terminer</button>
           )}
+        </div>
+      )}
+
+      {notificationStatus && (
+        <div style={{ ...cardStyle, padding: '9px 12px', marginBottom: 12, color: notificationStatus.startsWith('Notifications activ') ? '#10b981' : '#f59e0b', fontSize: '0.76rem' }}>
+          {notificationStatus}
         </div>
       )}
 
@@ -432,6 +476,17 @@ const dangerButtonStyle = {
   fontSize: '0.78rem',
 } satisfies React.CSSProperties;
 
+const secondaryButtonStyle = {
+  padding: '9px 12px',
+  borderRadius: 10,
+  background: 'rgba(255,255,255,0.06)',
+  border: '1px solid rgba(255,255,255,0.12)',
+  color: '#e2e8f0',
+  cursor: 'pointer',
+  fontWeight: 800,
+  fontSize: '0.78rem',
+} satisfies React.CSSProperties;
+
 const badgeStyle = {
   minWidth: 18,
   height: 18,
@@ -454,4 +509,59 @@ function explainError(message: string): string {
   if (message.includes('BODY_REQUIRED')) return 'Message vide';
   if (message.includes('BODY_TOO_LONG')) return 'Message trop long';
   return 'Action interne impossible';
+}
+
+async function sendIncomingCallPush(callId: string): Promise<void> {
+  const token = await auth.currentUser?.getIdToken();
+  if (!token) return;
+  await fetch('/api/telecom/internal-calls/notify', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ callId }),
+  }).catch(() => {
+    // Foreground Firestore ringing still works; push is best-effort for background/PWA.
+  });
+}
+
+let ringAudio: AudioContext | null = null;
+let ringOscillator: OscillatorNode | null = null;
+let ringGain: GainNode | null = null;
+
+async function playIncomingRing() {
+  if (typeof window === 'undefined' || ringOscillator) return;
+  try {
+    ringAudio = new AudioContext();
+    ringOscillator = ringAudio.createOscillator();
+    ringGain = ringAudio.createGain();
+    ringOscillator.type = 'sine';
+    ringOscillator.frequency.value = 740;
+    ringGain.gain.value = 0.045;
+    ringOscillator.connect(ringGain);
+    ringGain.connect(ringAudio.destination);
+    ringOscillator.start();
+  } catch {
+    // Browser autoplay rules may block audio until user interaction.
+  }
+}
+
+function stopIncomingRing() {
+  try {
+    ringOscillator?.stop();
+    ringAudio?.close();
+  } catch {
+    // ignore cleanup errors
+  } finally {
+    ringOscillator = null;
+    ringGain = null;
+    ringAudio = null;
+  }
+}
+
+function vibrateIncomingCall() {
+  if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+    navigator.vibrate([240, 120, 240, 120, 240]);
+  }
 }

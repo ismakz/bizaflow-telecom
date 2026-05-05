@@ -9,10 +9,15 @@ Les appels internes Bizaflow vers Bizaflow restent separes des appels externes. 
 ## Fichiers modifies
 
 - `app/lib/internalTelecom.ts`
+- `app/lib/pushNotifications.ts`
 - `app/telecom/page.tsx`
+- `app/telecom/call/[callId]/page.tsx`
 - `app/components/BottomNav.tsx`
+- `app/firebase-messaging-sw.js/route.ts`
+- `app/api/telecom/internal-calls/notify/route.ts`
 - `app/lib/firestore.ts`
 - `app/ceo/page.tsx`
+- `next.config.ts`
 - `docs/phase_internal_calls_chat.md`
 
 ## Collections utilisees
@@ -71,6 +76,16 @@ Les appels internes Bizaflow vers Bizaflow restent separes des appels externes. 
 - `lastSeenAt`
 - `updatedAt`
 
+### `telecom_push_tokens`
+
+- `userId`
+- `token`
+- `platform`: `web | android | ios | desktop`
+- `deviceName`
+- `isActive`
+- `createdAt`
+- `updatedAt`
+
 ### `telecom_internal_settings`
 
 Document `default` avec valeurs par defaut:
@@ -107,6 +122,56 @@ Le statut de presence est lu depuis `telecom_presence`.
 `endInternalCall()` termine l'appel et calcule une duree.
 
 `markInternalCallMissed()` passe l'appel a `missed` si personne ne repond.
+
+### Notification d'appel entrant
+
+Quand A appelle B:
+
+1. `startInternalCall()` cree l'appel `ringing`.
+2. La page `/telecom` appelle `POST /api/telecom/internal-calls/notify`.
+3. L'API verifie le token Firebase Auth du caller.
+4. L'API verifie que le `callId` existe, que l'appel est encore `ringing`, et que le caller est bien `callerId`.
+5. L'API lit les tokens actifs de B dans `telecom_push_tokens`.
+6. Firebase Cloud Messaging envoie une notification web:
+   - titre: `Appel Bizaflow Telecom`
+   - message: `{nom} vous appelle`
+   - lien: `/telecom/call/{callId}`
+
+La notification est best-effort: si B n'a pas encore active les notifications, l'appel temps reel Firestore continue de fonctionner lorsque l'application est ouverte.
+
+### Service worker
+
+Le service worker est servi dynamiquement par:
+
+- `/firebase-messaging-sw.js`
+
+Il gere:
+
+- reception Firebase Messaging en arriere-plan;
+- affichage notification persistante;
+- vibration si supportee;
+- actions visibles `Accepter` / `Refuser`;
+- clic notification vers `/telecom/call/{callId}`.
+
+Pour activer le push web, ajouter dans Vercel et `.env.local`:
+
+```env
+NEXT_PUBLIC_FIREBASE_VAPID_KEY=
+```
+
+La cle VAPID se genere dans Firebase Console -> Cloud Messaging -> Web Push certificates.
+
+### Sonnerie locale
+
+Quand l'application est ouverte:
+
+- l'appel entrant declenche une modal/alerte dans `/telecom`;
+- une sonnerie douce est generee par Web Audio API;
+- le navigateur vibre si `navigator.vibrate` est supporte;
+- le bouton `Couper` arrete la sonnerie;
+- `Accepter`, `Refuser`, `Terminer` arretent aussi la sonnerie.
+
+Si le navigateur bloque l'audio automatique, la notification push reste la methode principale.
 
 ### Signalisation WebRTC
 
@@ -147,14 +212,21 @@ Le CEO voit des statistiques globales, pas le contenu des messages prives.
 11. Refaire un appel sans reponse et attendre le timeout pour obtenir `missed`.
 12. Verifier le journal appels internes sur `/telecom`.
 13. Verifier les statistiques dans `/ceo`.
+14. Autoriser les notifications, fermer ou mettre l'application en arriere-plan, puis rappeler B.
+15. Cliquer la notification et verifier l'ouverture de `/telecom/call/{callId}`.
+16. Refuser ou laisser expirer pour verifier `declined` ou `missed`.
 
 ## Tests techniques executes
 
 - `npm run build`
+- `npm run lint`
 
 ## Limites connues
 
 - La signalisation WebRTC est structuree mais le flux media complet n'est pas encore branche.
+- Les push notifications web exigent `NEXT_PUBLIC_FIREBASE_VAPID_KEY` et une permission utilisateur.
+- Sur navigateur/PWA, un OS peut limiter la sonnerie si l'application est totalement fermee.
+- La sonnerie audio complete est fiable surtout quand l'application est ouverte ou reveillee par notification.
 - TURN n'est pas configure; certains reseaux mobiles ou NAT stricts pourront bloquer l'audio reel.
 - Les statuts `online/offline` dependent de la presence navigateur et peuvent rester imparfaits si un onglet est ferme brutalement.
 - Les regles Firestore doivent etre durcies pour garantir cote base qu'un utilisateur ne lit que ses conversations.
@@ -165,5 +237,5 @@ Le CEO voit des statistiques globales, pas le contenu des messages prives.
 1. Ajouter les regles Firestore de securite pour conversations, messages, presence et appels.
 2. Brancher WebRTC complet: `getUserMedia`, offer, answer, ICE candidates.
 3. Ajouter TURN server pour fiabilite reseaux mobiles.
-4. Ajouter providers externes Telnyx / Africa's Talking apres stabilisation de l'interne.
-
+4. Prevoir une app mobile native Android/iOS pour une sonnerie type WhatsApp si l'experience PWA est insuffisante.
+5. Ajouter providers externes Telnyx / Africa's Talking apres stabilisation de l'interne.
