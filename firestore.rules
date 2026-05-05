@@ -1,0 +1,390 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================
+    // HELPERS
+    // =========================
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/telecom_users/$(request.auth.uid)).data;
+    }
+
+    function myTelecomNumber() {
+      return getUserData().telecomNumber;
+    }
+
+    function isCEO() {
+      return isAuth() && getUserData().role == "ceo";
+    }
+
+    function isApproved() {
+      return isAuth() && getUserData().status == "approved";
+    }
+
+    function isOwner(uid) {
+      return isAuth() && request.auth.uid == uid;
+    }
+
+    function isParticipant(participantIds) {
+      return isApproved() && request.auth.uid in participantIds;
+    }
+
+    function hasTwoParticipants(participantIds) {
+      return participantIds is list &&
+        participantIds.size() == 2 &&
+        participantIds[0] is string &&
+        participantIds[1] is string;
+    }
+
+    function conversationIdMatches(conversationId, participantIds) {
+      return hasTwoParticipants(participantIds) &&
+        conversationId == participantIds[0] + "__" + participantIds[1];
+    }
+
+    function conversationDoc(conversationId) {
+      return get(/databases/$(database)/documents/telecom_conversations/$(conversationId)).data;
+    }
+
+    function messageConversationMatches(data) {
+      return conversationIdMatches(data.conversationId, conversationDoc(data.conversationId).participantIds) &&
+        data.senderId in conversationDoc(data.conversationId).participantIds &&
+        data.receiverId in conversationDoc(data.conversationId).participantIds;
+    }
+
+    function isSafeSelfUserUpdate(uid) {
+      return isOwner(uid) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "name",
+          "mustChangePassword",
+          "currentDocument",
+          "lastSeen",
+          "lastSeenAt",
+          "isOnline",
+          "updatedAt",
+          "pushToken",
+          "fcmToken"
+        ]);
+    }
+
+    function isDirectorySafeWriteForApprovedUser(uid) {
+      return isApproved() &&
+        request.resource.data.uid == uid &&
+        request.resource.data.telecomNumber is string &&
+        request.resource.data.status == "approved" &&
+        request.resource.data.isCallable == true &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "uid",
+          "name",
+          "telecomNumber",
+          "status",
+          "isCallable",
+          "updatedAt"
+        ]);
+    }
+
+    function isCallerOrReceiver(data) {
+      return isApproved() && (
+        data.callerId == request.auth.uid ||
+        data.callerUserId == request.auth.uid ||
+        data.receiverId == request.auth.uid ||
+        data.receiverUserId == request.auth.uid ||
+        data.targetUserId == request.auth.uid ||
+        data.userId == request.auth.uid ||
+        isCEO()
+      );
+    }
+
+    function isTelecomCallParticipant(data) {
+      return isApproved() && (
+        isCEO() ||
+        data.callerUserId == request.auth.uid ||
+        data.receiverUserId == request.auth.uid ||
+        data.targetUserId == request.auth.uid ||
+        data.callerId == request.auth.uid ||
+        data.receiverId == request.auth.uid ||
+        data.userId == request.auth.uid ||
+        data.from == myTelecomNumber() ||
+        data.to == myTelecomNumber() ||
+        data.callerTelecomNumber == myTelecomNumber() ||
+        data.targetTelecomNumber == myTelecomNumber()
+      );
+    }
+
+    function isTelecomCallCreator(data) {
+      return isApproved() && (
+        isCEO() ||
+        data.callerUserId == request.auth.uid ||
+        data.callerId == request.auth.uid ||
+        data.userId == request.auth.uid ||
+        data.from == myTelecomNumber() ||
+        data.callerTelecomNumber == myTelecomNumber()
+      );
+    }
+
+    function callDoc(callId) {
+      return get(/databases/$(database)/documents/telecom_internal_calls/$(callId)).data;
+    }
+
+    function isCallParticipantById(callId) {
+      return isApproved() && (
+        isCEO() ||
+        callDoc(callId).callerId == request.auth.uid ||
+        callDoc(callId).callerUserId == request.auth.uid ||
+        callDoc(callId).receiverId == request.auth.uid ||
+        callDoc(callId).receiverUserId == request.auth.uid ||
+        callDoc(callId).targetUserId == request.auth.uid
+      );
+    }
+
+    function callerForCall(callId) {
+      return callDoc(callId).callerId == request.auth.uid;
+    }
+
+    function receiverForCall(callId) {
+      return callDoc(callId).receiverId == request.auth.uid ||
+        callDoc(callId).receiverUserId == request.auth.uid ||
+        callDoc(callId).targetUserId == request.auth.uid;
+    }
+
+    // =========================
+    // USERS
+    // =========================
+    match /telecom_users/{uid} {
+      allow read: if isOwner(uid) || isCEO() || (
+        isApproved() && resource.data.status == "approved"
+      );
+
+      allow create: if isOwner(uid);
+      allow update: if isSafeSelfUserUpdate(uid) || isCEO();
+      allow delete: if isCEO();
+    }
+
+    // =========================
+    // PRESENCE
+    // =========================
+    match /telecom_presence/{uid} {
+      allow read: if isApproved();
+      allow create, update: if isOwner(uid) && isApproved();
+      allow delete: if isOwner(uid) || isCEO();
+    }
+
+    // =========================
+    // PUBLIC DIRECTORY
+    // =========================
+    match /telecom_directory/{uid} {
+      allow read: if isApproved();
+      allow create: if isOwner(uid) || isCEO() || (
+        isApproved()
+        && request.resource.data.uid == uid
+        && request.resource.data.status == "approved"
+        && request.resource.data.isCallable == true
+      );
+      allow update: if isOwner(uid) || isCEO() || isDirectorySafeWriteForApprovedUser(uid);
+      allow delete: if isCEO();
+    }
+
+    // =========================
+    // CONFIG
+    // Important: lecture pour users, écriture CEO seulement
+    // =========================
+    match /telecom_config/{doc} {
+      allow read: if isApproved();
+      allow write: if isCEO();
+    }
+
+    match /telecom_internal_settings/{doc} {
+      allow read: if isApproved();
+      allow create: if isApproved() && doc == "default";
+      allow update, delete: if isCEO();
+    }
+
+    // =========================
+    // CONTACTS
+    // =========================
+    match /telecom_contacts/{uid}/contacts/{contactId} {
+      allow read, write: if isOwner(uid) && isApproved();
+    }
+
+    // =========================
+    // OLD / GENERAL CALLS
+    // =========================
+    match /telecom_calls/{callId} {
+      allow read: if isTelecomCallParticipant(resource.data);
+
+      allow create: if isTelecomCallCreator(request.resource.data);
+
+      allow update: if isTelecomCallParticipant(resource.data);
+
+      allow delete: if isCEO();
+    }
+
+    // =========================
+    // INTERNAL CONVERSATIONS
+    // =========================
+    match /telecom_conversations/{conversationId} {
+      allow read: if isParticipant(resource.data.participantIds) || isCEO();
+
+      allow create: if isApproved()
+        && conversationIdMatches(conversationId, request.resource.data.participantIds)
+        && request.auth.uid in request.resource.data.participantIds;
+
+      allow update: if isCEO() || (
+        isParticipant(resource.data.participantIds)
+        && request.resource.data.participantIds == resource.data.participantIds
+        && conversationIdMatches(conversationId, request.resource.data.participantIds)
+      );
+
+      allow delete: if isCEO();
+    }
+
+    // =========================
+    // INTERNAL MESSAGES
+    // =========================
+    match /telecom_messages/{messageId} {
+      allow read: if isCEO() || (
+        isApproved() &&
+        request.auth.uid in conversationDoc(resource.data.conversationId).participantIds
+      );
+
+      allow create: if isApproved()
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.receiverId is string
+        && request.resource.data.receiverId != request.auth.uid
+        && request.resource.data.body is string
+        && request.resource.data.body.size() > 0
+        && request.resource.data.body.size() <= 2000
+        && request.resource.data.conversationId is string
+        && messageConversationMatches(request.resource.data);
+
+      allow update: if isCEO() || (
+        isApproved()
+        && resource.data.receiverId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt"])
+        && request.resource.data.status == "read"
+      );
+
+      allow delete: if isCEO();
+    }
+
+    // =========================
+    // INTERNAL CALLS
+    // =========================
+    match /telecom_internal_calls/{callId} {
+      allow read: if isCallerOrReceiver(resource.data);
+
+      allow create: if isApproved()
+        && request.resource.data.callerId == request.auth.uid
+        && request.resource.data.receiverId is string
+        && request.resource.data.receiverId != request.auth.uid
+        && hasTwoParticipants(request.resource.data.participants)
+        && request.auth.uid in request.resource.data.participants
+        && request.resource.data.receiverId in request.resource.data.participants
+        && request.resource.data.status == "ringing";
+
+      allow update: if isApproved() && (
+        isCEO() ||
+        (
+          resource.data.receiverId == request.auth.uid &&
+          resource.data.status == "ringing" &&
+          request.resource.data.status in ["accepted", "declined"] &&
+          request.resource.data.diff(resource.data).changedKeys().hasOnly(["status", "answeredAt", "endedAt", "updatedAt"])
+        ) ||
+        (
+          (resource.data.callerId == request.auth.uid || resource.data.receiverId == request.auth.uid) &&
+          request.resource.data.status in ["completed", "failed", "missed"] &&
+          request.resource.data.diff(resource.data).changedKeys().hasOnly(["status", "endedAt", "durationSeconds", "updatedAt"])
+        )
+      );
+
+      allow delete: if isCEO();
+    }
+
+    // =========================
+    // WEBRTC SIGNALS
+    // =========================
+    match /telecom_call_signals/{callId} {
+      allow read: if isCallParticipantById(callId);
+
+      allow create: if isApproved()
+        && callerForCall(callId)
+        && request.resource.data.callId == callId
+        && request.resource.data.callerId == request.auth.uid
+        && request.resource.data.receiverId == callDoc(callId).receiverId;
+
+      allow update: if isCallParticipantById(callId) && (
+        isCEO() ||
+        (
+          callerForCall(callId) &&
+          request.resource.data.callId == resource.data.callId &&
+          request.resource.data.callerId == resource.data.callerId &&
+          request.resource.data.receiverId == resource.data.receiverId &&
+          request.resource.data.diff(resource.data).changedKeys().hasOnly(["callerOffer", "callerCandidates", "updatedAt"])
+        ) ||
+        (
+          receiverForCall(callId) &&
+          request.resource.data.callId == resource.data.callId &&
+          request.resource.data.callerId == resource.data.callerId &&
+          request.resource.data.receiverId == resource.data.receiverId &&
+          request.resource.data.diff(resource.data).changedKeys().hasOnly(["receiverAnswer", "receiverCandidates", "sessionReady", "updatedAt"])
+        )
+      );
+
+      allow delete: if isCEO();
+    }
+
+    // =========================
+    // PUSH TOKENS
+    // =========================
+    match /telecom_push_tokens/{tokenId} {
+      allow read: if isApproved() && (
+        isCEO() || resource.data.userId == request.auth.uid
+      );
+
+      allow create: if isApproved()
+        && request.resource.data.userId == request.auth.uid;
+
+      allow update, delete: if isApproved() && (
+        isCEO() || resource.data.userId == request.auth.uid
+      );
+    }
+
+    // =========================
+    // TRANSACTIONS
+    // =========================
+    match /telecom_transactions/{txId} {
+      allow read: if isApproved() && (
+        resource.data.userId == request.auth.uid || isCEO()
+      );
+
+      allow create: if isApproved();
+      allow update, delete: if isCEO();
+    }
+
+    // =========================
+    // PACKS CATALOG
+    // =========================
+    match /telecom_packs/{packId} {
+      allow read: if isApproved();
+      allow create, update, delete: if isCEO();
+    }
+
+    // =========================
+    // USER PACKS
+    // =========================
+    match /telecom_user_packs/{userPackId} {
+      allow read: if isApproved() && (
+        resource.data.userId == request.auth.uid || isCEO()
+      );
+
+      allow create: if isApproved() && (
+        request.resource.data.userId == request.auth.uid || isCEO()
+      );
+
+      allow update, delete: if isCEO();
+    }
+  }
+}

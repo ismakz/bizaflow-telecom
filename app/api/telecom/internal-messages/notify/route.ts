@@ -6,7 +6,7 @@ import { adminDb } from '@/app/lib/firebaseAdmin';
 export const dynamic = 'force-dynamic';
 
 type NotifyBody = {
-  callId?: string;
+  messageId?: string;
 };
 
 export async function POST(request: Request) {
@@ -22,26 +22,34 @@ export async function POST(request: Request) {
   }
 
   const body = (await request.json().catch(() => null)) as NotifyBody | null;
-  if (!body?.callId) {
-    return NextResponse.json({ ok: false, error: 'CALL_ID_REQUIRED' }, { status: 400 });
+  if (!body?.messageId) {
+    return NextResponse.json({ ok: false, error: 'MESSAGE_ID_REQUIRED' }, { status: 400 });
   }
 
-  const callSnap = await adminDb.collection('telecom_internal_calls').doc(body.callId).get();
-  if (!callSnap.exists) {
-    return NextResponse.json({ ok: false, error: 'CALL_NOT_FOUND' }, { status: 404 });
+  const messageSnap = await adminDb.collection('telecom_messages').doc(body.messageId).get();
+  if (!messageSnap.exists) {
+    return NextResponse.json({ ok: false, error: 'MESSAGE_NOT_FOUND' }, { status: 404 });
   }
 
-  const call = callSnap.data()!;
-  if (call.callerId !== session.uid) {
-    return NextResponse.json({ ok: false, error: 'CALL_NOTIFY_FORBIDDEN' }, { status: 403 });
+  const message = messageSnap.data() || {};
+  if (message.senderId !== session.uid) {
+    return NextResponse.json({ ok: false, error: 'MESSAGE_NOTIFY_FORBIDDEN' }, { status: 403 });
   }
-  if (call.status !== 'ringing') {
-    return NextResponse.json({ ok: false, error: 'CALL_NOT_RINGING' }, { status: 409 });
+
+  const receiverId = String(message.receiverId || '');
+  if (!receiverId) {
+    return NextResponse.json({ ok: false, error: 'MESSAGE_RECEIVER_REQUIRED' }, { status: 400 });
   }
+
+  const senderSnap = await adminDb.collection('telecom_users').doc(session.uid).get();
+  const sender = senderSnap.data() || {};
+  const senderName = String(sender.name || sender.email || 'Contact Bizaflow');
+  const rawBody = String(message.body || '');
+  const preview = rawBody.length > 90 ? `${rawBody.slice(0, 87)}...` : rawBody;
 
   const tokensSnap = await adminDb
     .collection('telecom_push_tokens')
-    .where('userId', '==', call.receiverId)
+    .where('userId', '==', receiverId)
     .where('isActive', '==', true)
     .get();
 
@@ -50,29 +58,35 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, delivered: 0, reason: 'NO_ACTIVE_PUSH_TOKEN' });
   }
 
+  const url = `/telecom?user=${encodeURIComponent(session.uid)}`;
+  const title = 'Nouveau message Bizaflow';
+  const notificationBody = `${senderName}: ${preview}`;
   let response;
   try {
     response = await getMessaging().sendEachForMulticast({
       tokens,
       notification: {
-        title: 'Appel Bizaflow Telecom',
-        body: `${call.callerName || 'Un contact'} vous appelle`,
+        title,
+        body: notificationBody,
       },
       data: {
-        type: 'internal_call',
-        callId: body.callId,
-        callerId: String(call.callerId || ''),
-        callerName: String(call.callerName || 'Contact Bizaflow'),
-        url: `/telecom/call/${body.callId}`,
+        type: 'internal_message',
+        title,
+        body: notificationBody,
+        messageId: body.messageId,
+        conversationId: String(message.conversationId || ''),
+        senderId: session.uid,
+        senderName,
+        url,
       },
       webpush: {
         fcmOptions: {
-          link: `/telecom/call/${body.callId}`,
+          link: url,
         },
       },
     });
   } catch (error) {
-    console.error('[Bizaflow Notify] FCM internal_call error', error);
+    console.error('[Bizaflow Notify] FCM internal_message error', error);
     return NextResponse.json({ ok: false, error: 'FCM_SEND_FAILED' }, { status: 500 });
   }
 
@@ -82,4 +96,3 @@ export async function POST(request: Request) {
     failed: response.failureCount,
   });
 }
-

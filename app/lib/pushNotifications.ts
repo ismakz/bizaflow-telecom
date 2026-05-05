@@ -11,12 +11,28 @@ export interface PushRegistrationResult {
   reason?: string;
 }
 
+export interface ForegroundPushPayload {
+  type?: 'internal_call' | 'internal_message' | string;
+  title: string;
+  body: string;
+  callId?: string;
+  callerName?: string;
+  messageId?: string;
+  conversationId?: string;
+  senderId?: string;
+  senderName?: string;
+  url?: string;
+}
+
 export async function registerPushToken(userId: string): Promise<PushRegistrationResult> {
   if (typeof window === 'undefined' || !('Notification' in window)) {
+    console.log('Notification permission: unsupported');
     return { ok: false, permission: 'denied', reason: 'NOTIFICATIONS_NOT_SUPPORTED' };
   }
 
+  console.log(`Notification permission: ${Notification.permission}`);
   const permission = await Notification.requestPermission();
+  console.log(`Notification permission: ${permission}`);
   if (permission !== 'granted') {
     return { ok: false, permission, reason: 'NOTIFICATION_PERMISSION_DENIED' };
   }
@@ -32,6 +48,7 @@ export async function registerPushToken(userId: string): Promise<PushRegistratio
   }
 
   const registration = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
+  console.log('Service worker registered');
   const messaging = getMessaging(app);
   const token = await getToken(messaging, {
     vapidKey,
@@ -55,6 +72,7 @@ export async function registerPushToken(userId: string): Promise<PushRegistratio
     },
     { merge: true }
   );
+  console.log('Push token saved');
 
   return { ok: true, permission, token };
 }
@@ -64,18 +82,23 @@ export async function deactivatePushToken(token: string): Promise<void> {
   await deleteDoc(doc(db, 'telecom_push_tokens', token));
 }
 
-export async function onForegroundPushMessage(
-  handler: (payload: { title: string; body: string; callId?: string; callerName?: string }) => void
-) {
+export async function onForegroundPushMessage(handler: (payload: ForegroundPushPayload) => void) {
   const supported = await isSupported().catch(() => false);
   if (!supported) return () => {};
   const messaging = getMessaging(app);
   return onMessage(messaging, (payload) => {
+    console.log('Foreground message received', payload);
     handler({
-      title: payload.notification?.title || 'Appel Bizaflow Telecom',
-      body: payload.notification?.body || 'Appel entrant',
+      type: payload.data?.type,
+      title: payload.notification?.title || payload.data?.title || 'Bizaflow Telecom',
+      body: payload.notification?.body || payload.data?.body || 'Nouvelle activite',
       callId: payload.data?.callId,
       callerName: payload.data?.callerName,
+      messageId: payload.data?.messageId,
+      conversationId: payload.data?.conversationId,
+      senderId: payload.data?.senderId,
+      senderName: payload.data?.senderName,
+      url: payload.data?.url,
     });
   });
 }
@@ -92,4 +115,3 @@ function getDeviceName(): string {
   if (typeof navigator === 'undefined') return 'Navigateur web';
   return navigator.userAgent.slice(0, 120);
 }
-

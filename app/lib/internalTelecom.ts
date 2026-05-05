@@ -1,5 +1,6 @@
 import {
   addDoc,
+  arrayUnion,
   collection,
   doc,
   getDoc,
@@ -20,6 +21,7 @@ import type { UserRole, UserStatus } from '@/app/lib/types';
 export type PresenceStatus = 'online' | 'offline' | 'busy' | 'in_call';
 export type MessageStatus = 'sent' | 'delivered' | 'read';
 export type InternalCallStatus = 'ringing' | 'accepted' | 'declined' | 'missed' | 'completed' | 'failed';
+export type IceCandidateRole = 'caller' | 'receiver';
 
 export interface InternalTelecomUser {
   uid: string;
@@ -64,6 +66,20 @@ export interface TelecomInternalCall {
   answeredAt: Timestamp | null;
   endedAt: Timestamp | null;
   durationSeconds: number;
+  createdAt: Timestamp | null;
+  updatedAt: Timestamp | null;
+}
+
+export interface TelecomCallSignal {
+  id: string;
+  callId: string;
+  callerOffer: RTCSessionDescriptionInit | null;
+  receiverAnswer: RTCSessionDescriptionInit | null;
+  callerCandidates: RTCIceCandidateInit[];
+  receiverCandidates: RTCIceCandidateInit[];
+  stunServers: string[];
+  turnConfigured: boolean;
+  sessionReady: boolean;
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
 }
@@ -203,16 +219,100 @@ export function subscribeUserConversations(
 
 export function subscribeConversationMessages(
   conversationId: string,
-  callback: (messages: TelecomMessage[]) => void
+  callback: (messages: TelecomMessage[]) => void,
+  onError?: (error: Error) => void
 ): Unsubscribe {
   const messagesQuery = query(collection(db, 'telecom_messages'), where('conversationId', '==', conversationId));
-  return onSnapshot(messagesQuery, (snap) => {
-    callback(
-      snap.docs
-        .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() } as TelecomMessage))
-        .sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0))
-    );
+  return onSnapshot(
+    messagesQuery,
+    (snap) => {
+      callback(
+        snap.docs
+          .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() } as TelecomMessage))
+          .sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0))
+      );
+    },
+    (error) => {
+      onError?.(error);
+    }
+  );
+}
+
+export function subscribeIncomingMessages(
+  userId: string,
+  callback: (messages: TelecomMessage[]) => void,
+  onError?: (error: Error) => void
+): Unsubscribe {
+  const messagesQuery = query(collection(db, 'telecom_messages'), where('receiverId', '==', userId));
+  return onSnapshot(
+    messagesQuery,
+    (snap) => {
+      callback(
+        snap.docs
+          .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() } as TelecomMessage))
+          .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0))
+      );
+    },
+    (error) => {
+      onError?.(error);
+    }
+  );
+}
+
+export function subscribeInternalCall(
+  callId: string,
+  callback: (call: TelecomInternalCall | null) => void
+): Unsubscribe {
+  return onSnapshot(doc(db, 'telecom_internal_calls', callId), (snap) => {
+    callback(snap.exists() ? ({ id: snap.id, ...snap.data() } as TelecomInternalCall) : null);
   });
+}
+
+export function subscribeCallSignal(
+  callId: string,
+  callback: (signal: TelecomCallSignal | null) => void
+): Unsubscribe {
+  return onSnapshot(doc(db, 'telecom_call_signals', callId), (snap) => {
+    callback(snap.exists() ? ({ id: snap.id, ...snap.data() } as TelecomCallSignal) : null);
+  });
+}
+
+export async function saveCallerOffer(callId: string, offer: RTCSessionDescriptionInit): Promise<void> {
+  await setDoc(
+    doc(db, 'telecom_call_signals', callId),
+    {
+      callerOffer: offer,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+export async function saveReceiverAnswer(callId: string, answer: RTCSessionDescriptionInit): Promise<void> {
+  await setDoc(
+    doc(db, 'telecom_call_signals', callId),
+    {
+      receiverAnswer: answer,
+      sessionReady: true,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+export async function addCallIceCandidate(
+  callId: string,
+  role: IceCandidateRole,
+  candidate: RTCIceCandidateInit
+): Promise<void> {
+  await setDoc(
+    doc(db, 'telecom_call_signals', callId),
+    {
+      [role === 'caller' ? 'callerCandidates' : 'receiverCandidates']: arrayUnion(candidate),
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
 }
 
 export async function sendInternalMessage(input: {
@@ -239,6 +339,7 @@ export async function sendInternalMessage(input: {
       participantIds: [input.senderId, input.receiverId].sort(),
       lastMessage: body,
       lastMessageAt: now,
+      [`unreadCountByUser.${input.senderId}`]: 0,
       [`unreadCountByUser.${input.receiverId}`]: increment(1),
       updatedAt: now,
       createdAt: now,
@@ -339,12 +440,14 @@ export async function startInternalCall(input: {
 
   await setDoc(doc(db, 'telecom_call_signals', callRef.id), {
     callId: callRef.id,
+    callerId: input.callerId,
+    receiverId: input.receiverId,
     callerOffer: null,
     receiverAnswer: null,
     callerCandidates: [],
     receiverCandidates: [],
-    stunServers: ['stun:stun.l.google.com:19302'],
-    turnConfigured: false,
+    stunServers: ['stun:stun.l.google.com:19302', 'stun:global.stun.twilio.com:3478'],
+    turnConfigured: Boolean(process.env.NEXT_PUBLIC_TURN_URL),
     sessionReady: false,
     createdAt: now,
     updatedAt: now,
@@ -400,4 +503,3 @@ export async function markInternalCallMissed(call: TelecomInternalCall): Promise
     updatedAt: serverTimestamp(),
   });
 }
-

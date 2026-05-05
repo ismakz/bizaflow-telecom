@@ -19,21 +19,26 @@ const messaging = firebase.messaging();
 
 messaging.onBackgroundMessage((payload) => {
   const data = payload.data || {};
-  const title = payload.notification?.title || 'Appel Bizaflow Telecom';
-  const body = payload.notification?.body || (data.callerName ? data.callerName + ' vous appelle' : 'Appel entrant');
+  const isMessage = data.type === 'internal_message';
+  const title = payload.notification?.title || data.title || (isMessage ? 'Nouveau message Bizaflow' : 'Appel Bizaflow Telecom');
+  const body = payload.notification?.body || data.body || (data.callerName ? data.callerName + ' vous appelle' : 'Appel entrant');
+  const url = data.url || (isMessage ? '/telecom?user=' + (data.senderId || '') : (data.callId ? '/telecom/call/' + data.callId : '/telecom'));
   self.registration.showNotification(title, {
     body,
     icon: '/logo_bizaflow.png',
     badge: '/logo_bizaflow.png',
-    tag: data.callId || 'bizaflow-call',
+    tag: data.messageId || data.callId || 'bizaflow-telecom',
     renotify: true,
-    requireInteraction: true,
-    vibrate: [240, 120, 240, 120, 240],
+    requireInteraction: !isMessage,
+    vibrate: isMessage ? [120, 60, 120] : [240, 120, 240, 120, 240],
     data: {
+      type: data.type || 'internal_call',
       callId: data.callId || '',
-      url: data.callId ? '/telecom/call/' + data.callId : '/telecom',
+      messageId: data.messageId || '',
+      senderId: data.senderId || '',
+      url,
     },
-    actions: [
+    actions: isMessage ? [] : [
       { action: 'accept', title: 'Accepter' },
       { action: 'decline', title: 'Refuser' },
     ],
@@ -43,7 +48,8 @@ messaging.onBackgroundMessage((payload) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const callId = event.notification.data?.callId || '';
-  const targetUrl = new URL(callId ? '/telecom/call/' + callId : '/telecom', self.location.origin).href;
+  const url = event.notification.data?.url || (callId ? '/telecom/call/' + callId : '/telecom');
+  const targetUrl = new URL(url, self.location.origin).href;
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
       for (const client of clients) {
@@ -66,4 +72,3 @@ self.addEventListener('notificationclick', (event) => {
     },
   });
 }
-
