@@ -85,12 +85,27 @@ Nouvelle convention:
 Route ajoutee:
 
 - `GET /api/telecom/health`
+- `POST /api/telecom/calls/estimate`
 
-Elle expose le mode actif et l'etat des ports sans exposer de secret.
+Le healthcheck expose le mode actif, l'etat des ports et les providers disponibles sans exposer de secret.
+
+Exemple estimation:
+
+```http
+POST /api/telecom/calls/estimate
+Content-Type: application/json
+
+{
+  "receiverNumber": "+243990000000",
+  "durationSeconds": 60
+}
+```
+
+La reponse choisit un provider configure si possible. Si aucun provider reel n'est encore configure, la route repond proprement `TELECOM_PROVIDER_NOT_CONFIGURED` avec les candidats et les prix estimes.
 
 ## Provider strategy
 
-Etape suivante: creer `TelecomProviderAdapter` cote serveur.
+`TelecomProviderAdapter` est cree cote serveur dans `app/lib/telecom/providers.ts`.
 
 Chaque provider devra implementer:
 
@@ -101,6 +116,7 @@ Chaque provider devra implementer:
 - `normalizePhoneNumber()`
 - `validateDestination()`
 - `getProviderName()`
+- `isConfigured()`
 
 Providers cibles:
 
@@ -111,6 +127,17 @@ Providers cibles:
 - Africa's Talking
 - Termii
 - Provider local futur
+
+La normalisation telephone est centralisee dans `app/lib/telecom/phone.ts`.
+
+Le routage actuel:
+
+- normalise le numero en E.164;
+- identifie pays et reseau quand possible;
+- filtre les providers capables de traiter la destination;
+- privilegie les providers africains quand ils sont configures;
+- estime cout provider, prix de vente Bizaflow et marge;
+- retourne un fallback quand disponible.
 
 ## Facturation
 

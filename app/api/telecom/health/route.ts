@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getTelecomModuleConfig } from '@/app/lib/telecom/init';
+import { listProviderRuntime } from '@/app/lib/telecom/providers';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,6 +22,7 @@ export async function GET() {
         notifications: 'configured',
         logs: 'configured',
       },
+      providers: listProviderRuntime(config.currency),
       time: new Date().toISOString(),
     },
     {
