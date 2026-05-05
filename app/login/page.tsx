@@ -47,7 +47,7 @@ export default function LoginPage() {
         // AppProvider will detect pending status and redirect to /pending
       } else {
         setStatusMessage('Connexion en cours...');
-        await signIn(email, password);
+        await signIn(email.trim().toLowerCase(), password.trim());
 
         const currentUser = auth.currentUser;
         if (!currentUser) {
@@ -87,10 +87,11 @@ export default function LoginPage() {
       console.error('LOGIN FLOW ERROR', err);
       setStatusMessage('');
       const message = err instanceof Error ? err.message : 'Une erreur est survenue';
+      const technicalHint = ` (${message})`;
       if (message.includes('email-already-in-use')) {
         setError('Cet email est déjà utilisé');
       } else if (message.includes('wrong-password') || message.includes('invalid-credential')) {
-        setError('Email ou mot de passe incorrect');
+        setError(`Email ou mot de passe incorrect${technicalHint}`);
       } else if (message.includes('user-not-found')) {
         setError('Aucun compte trouvé avec cet email');
       } else if (message.includes('weak-password')) {
@@ -108,7 +109,7 @@ export default function LoginPage() {
       } else if (message.includes('AUTH_SUCCESS_BUT_NO_CURRENT_USER')) {
         setError('Session invalide après connexion. Réessayez.');
       } else {
-        setError('Email ou mot de passe incorrect');
+        setError(`Connexion refusee${technicalHint}`);
       }
     } finally {
       setLoading(false);
