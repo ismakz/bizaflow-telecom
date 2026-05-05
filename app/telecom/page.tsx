@@ -100,6 +100,9 @@ export default function InternalTelecomPage() {
   const [ringtoneActive, setRingtoneActive] = useState(false);
   const [alertsEnabled, setAlertsEnabled] = useState(false);
   const [showIncomingCallModal, setShowIncomingCallModal] = useState(false);
+  const [showActivationModal, setShowActivationModal] = useState(false);
+  const [activationBusy, setActivationBusy] = useState(false);
+  const [activationError, setActivationError] = useState('');
   const [notificationStatus, setNotificationStatus] = useState('');
   const [sending, setSending] = useState(false);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -116,6 +119,8 @@ export default function InternalTelecomPage() {
   const activeCallRef = useRef<TelecomInternalCall | null>(null);
   const incomingMessagesInitializedRef = useRef(false);
   const notifiedMessageIdsRef = useRef<Set<string>>(new Set());
+  const incomingMessagesPermissionToastShownRef = useRef(false);
+  const conversationMessagesPermissionToastShownRef = useRef(false);
 
   useEffect(() => {
     activeCallRef.current = activeCall;
@@ -247,33 +252,52 @@ export default function InternalTelecomPage() {
 
   const enableNotificationsAndRingtone = useCallback(async () => {
     if (!user || typeof window === 'undefined') return;
+    setActivationBusy(true);
+    setActivationError('');
     try {
       console.log(`Notification permission: ${Notification.permission}`);
     } catch {
       console.log('Notification permission: unsupported');
     }
-    const AudioCtx = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (AudioCtx && !ringtoneContextRef.current) {
-      ringtoneContextRef.current = new AudioCtx();
-    }
-    if (ringtoneContextRef.current?.state === 'suspended') {
-      await ringtoneContextRef.current.resume().catch(() => undefined);
-    }
-    const result = await registerPushToken(user.uid);
-    if ('serviceWorker' in navigator) {
-      const swReg = await navigator.serviceWorker.getRegistration('/firebase-messaging-sw.js');
-      if (swReg) console.log('Service worker registered');
-    }
-    if (result.ok) {
-      setAlertsEnabled(true);
-      console.log('Push token saved');
-      playMessageSound();
-      setNotificationStatus('Notifications et sonnerie activées');
-      showToast({ message: 'Notifications et sonnerie activées', variant: 'success' });
-    } else if (result.reason === 'VAPID_KEY_NOT_CONFIGURED') {
-      setNotificationStatus('Push non configuré: ajoutez NEXT_PUBLIC_FIREBASE_VAPID_KEY pour les notifications système.');
-    } else {
-      setNotificationStatus('Permission notifications refusée ou push indisponible.');
+    try {
+      const AudioCtx = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (AudioCtx && !ringtoneContextRef.current) {
+        ringtoneContextRef.current = new AudioCtx();
+      }
+      if (ringtoneContextRef.current?.state === 'suspended') {
+        await ringtoneContextRef.current.resume().catch(() => undefined);
+      }
+      const result = await registerPushToken(user.uid);
+      if ('serviceWorker' in navigator) {
+        const swReg = await navigator.serviceWorker.getRegistration('/firebase-messaging-sw.js');
+        if (swReg) console.log('Service worker registered');
+      }
+      if (result.ok) {
+        setAlertsEnabled(true);
+        console.log('Push token saved');
+        playMessageSound();
+        setNotificationStatus('Notifications et sonnerie activées');
+        showToast({ message: 'Notifications et sonnerie activées', variant: 'success' });
+        setShowActivationModal(false);
+        window.localStorage.setItem('telecom_alerts_enabled', 'true');
+      } else if (result.reason === 'VAPID_KEY_NOT_CONFIGURED') {
+        const msg = 'Configuration push incomplète. Contactez l’administrateur.';
+        setNotificationStatus(msg);
+        setActivationError(msg);
+      } else {
+        const denied = result.reason === 'NOTIFICATION_PERMISSION_DENIED' || result.permission === 'denied';
+        const msg = denied
+          ? 'Votre navigateur bloque les notifications. Cliquez sur le cadenas près de l’adresse du site, puis autorisez Notifications.'
+          : 'Configuration push incomplète. Contactez l’administrateur.';
+        setNotificationStatus(msg);
+        setActivationError(msg);
+      }
+    } catch {
+      const msg = 'Configuration push incomplète. Contactez l’administrateur.';
+      setNotificationStatus(msg);
+      setActivationError(msg);
+    } finally {
+      setActivationBusy(false);
     }
   }, [playMessageSound, showToast, user]);
 
@@ -309,6 +333,15 @@ export default function InternalTelecomPage() {
   }, [user]);
 
   useEffect(() => {
+    if (!user || typeof window === 'undefined') return;
+    const stored = window.localStorage.getItem('telecom_alerts_enabled') === 'true';
+    const granted = typeof Notification !== 'undefined' && Notification.permission === 'granted';
+    const enabled = stored && granted;
+    setAlertsEnabled(enabled);
+    setShowActivationModal(!enabled);
+  }, [user]);
+
+  useEffect(() => {
     let unsubscribe = () => {};
     void onForegroundPushMessage((payload) => {
       console.log('Foreground message received', payload);
@@ -333,6 +366,14 @@ export default function InternalTelecomPage() {
 
   useEffect(() => {
     if (!user) return;
+    if (user.status !== 'approved') {
+      console.warn('[Listener skip] subscribeIncomingMessages user not approved', {
+        currentUserUid: user.uid,
+        telecomNumber: user.telecomNumber,
+        status: user.status,
+      });
+      return;
+    }
     incomingMessagesInitializedRef.current = false;
     console.log('[Listener subscribe] incoming_messages', {
       listener: 'subscribeIncomingMessages',
@@ -370,7 +411,10 @@ export default function InternalTelecomPage() {
           error,
         });
         if (error instanceof FirebaseError && error.code === 'permission-denied') {
-          showToast({ message: 'Permission refusée: notifications messages indisponibles.', variant: 'error' });
+          if (!incomingMessagesPermissionToastShownRef.current) {
+            incomingMessagesPermissionToastShownRef.current = true;
+            setNotificationStatus('Accès messages interne refusé. Vérifiez les permissions de votre compte.');
+          }
         }
       }
     );
@@ -449,7 +493,10 @@ export default function InternalTelecomPage() {
           error,
         });
         if (error instanceof FirebaseError && error.code === 'permission-denied') {
-          showToast({ message: 'Permission refusée: accès aux messages interdit.', variant: 'error' });
+          if (!conversationMessagesPermissionToastShownRef.current) {
+            conversationMessagesPermissionToastShownRef.current = true;
+            setNotificationStatus('Accès conversation refusé. Vérifiez les permissions de ce chat.');
+          }
           return;
         }
         showToast({ message: 'Lecture des messages impossible', variant: 'error' });
@@ -905,6 +952,38 @@ export default function InternalTelecomPage() {
         </div>
       )}
 
+      {showActivationModal && (
+        <div style={activationModalBackdropStyle}>
+          <div style={activationModalStyle}>
+            <h2 style={{ margin: '0 0 8px', fontSize: '1.03rem' }}>Activez les appels et notifications Bizaflow Telecom</h2>
+            <p style={{ margin: '0 0 14px', color: '#cbd5e1', fontSize: '0.86rem', lineHeight: 1.45 }}>
+              Pour recevoir les appels, messages et sonneries même en arrière-plan, autorisez les notifications.
+              {' '}Pour une activation 100% automatique comme WhatsApp, une application mobile native Android/iOS sera nécessaire.
+            </p>
+            {activationError && (
+              <div style={{ ...cardStyle, padding: '8px 10px', marginBottom: 12, color: '#f59e0b', fontSize: '0.78rem' }}>
+                {activationError}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
+              <button
+                onClick={enableNotificationsAndRingtone}
+                className="btn-primary"
+                style={{ width: 'auto', padding: '10px 14px', opacity: activationBusy ? 0.7 : 1 }}
+                disabled={activationBusy}
+              >
+                {activationBusy ? 'Activation...' : 'Activer maintenant'}
+              </button>
+              {activationError && (
+                <button onClick={enableNotificationsAndRingtone} style={secondaryButtonStyle} disabled={activationBusy}>
+                  Réessayer
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{ ...cardStyle, padding: 10, marginBottom: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
         <div style={{ fontSize: '0.74rem', color: alertsEnabled ? '#10b981' : '#94a3b8', fontWeight: 700 }}>
           {alertsEnabled ? 'Alertes actives' : 'Alertes inactives'}
@@ -1206,6 +1285,27 @@ const incomingModalStyle = {
   background: '#0f172a',
   border: '1px solid rgba(6,182,212,0.38)',
   boxShadow: '0 20px 60px rgba(0,0,0,0.42)',
+  padding: 18,
+  textAlign: 'center',
+} satisfies React.CSSProperties;
+
+const activationModalBackdropStyle = {
+  position: 'fixed',
+  inset: 0,
+  background: 'rgba(2, 6, 23, 0.76)',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  zIndex: 1300,
+  padding: 16,
+} satisfies React.CSSProperties;
+
+const activationModalStyle = {
+  width: 'min(500px, 100%)',
+  borderRadius: 14,
+  background: '#0f172a',
+  border: '1px solid rgba(6,182,212,0.36)',
+  boxShadow: '0 24px 64px rgba(0,0,0,0.45)',
   padding: 18,
   textAlign: 'center',
 } satisfies React.CSSProperties;
