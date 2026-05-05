@@ -152,7 +152,7 @@ export async function POST(request: Request) {
       role: 'ceo',
       status: 'approved',
       balance: existingProfile?.balance ?? 1000,
-      mustChangePassword: true,
+      mustChangePassword: false,
       createdAt: existingProfile?.createdAt ?? FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     },
