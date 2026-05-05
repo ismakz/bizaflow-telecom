@@ -91,7 +91,9 @@ export default function InternalTelecomPage() {
   const [remoteStreamReceived, setRemoteStreamReceived] = useState(false);
   const [remoteTrackCount, setRemoteTrackCount] = useState(0);
   const [offerWritten, setOfferWritten] = useState(false);
+  const [offerReceived, setOfferReceived] = useState(false);
   const [answerWritten, setAnswerWritten] = useState(false);
+  const [answerReceived, setAnswerReceived] = useState(false);
   const [localCandidateCount, setLocalCandidateCount] = useState(0);
   const [remoteCandidateCount, setRemoteCandidateCount] = useState(0);
   const [audioPlayStatus, setAudioPlayStatus] = useState('En attente');
@@ -106,6 +108,7 @@ export default function InternalTelecomPage() {
   const [notificationStatus, setNotificationStatus] = useState('');
   const [sending, setSending] = useState(false);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
   const ringtoneContextRef = useRef<AudioContext | null>(null);
   const ringtoneOscillatorRef = useRef<OscillatorNode | null>(null);
   const ringtoneGainRef = useRef<GainNode | null>(null);
@@ -525,7 +528,9 @@ export default function InternalTelecomPage() {
     setRemoteStreamReceived(false);
     setRemoteTrackCount(0);
     setOfferWritten(false);
+    setOfferReceived(false);
     setAnswerWritten(false);
+    setAnswerReceived(false);
     setLocalCandidateCount(0);
     setRemoteCandidateCount(0);
     setAudioPlayStatus('En attente');
@@ -534,6 +539,7 @@ export default function InternalTelecomPage() {
       remoteAudioRef.current.srcObject = null;
       remoteAudioRef.current.muted = false;
     }
+    remoteStreamRef.current = null;
     setCallUiStatus(nextStatus);
   }, []);
 
@@ -596,8 +602,8 @@ export default function InternalTelecomPage() {
     if (!['failed', 'disconnected'].includes(iceState)) return;
     const timer = window.setTimeout(() => {
       if (peerConnectionRef.current && ['failed', 'disconnected'].includes(peerConnectionRef.current.iceConnectionState)) {
-        setRtcWarning('TURN requis pour ce réseau');
-        setLastWebRtcError('TURN requis pour ce réseau');
+        setRtcWarning('Connexion audio impossible sur ce réseau. Serveur TURN requis.');
+        setLastWebRtcError('Connexion audio impossible sur ce réseau. Serveur TURN requis.');
       }
     }, 3500);
     return () => window.clearTimeout(timer);
@@ -654,6 +660,7 @@ export default function InternalTelecomPage() {
 
     const peerConnection = new RTCPeerConnection({ iceServers: getWebRtcIceServers() });
     peerConnectionRef.current = peerConnection;
+    peerConnection.addTransceiver('audio', { direction: 'sendrecv' });
     setIceState(peerConnection.iceConnectionState);
     setConnectionState(peerConnection.connectionState);
     setSignalingState(peerConnection.signalingState);
@@ -667,7 +674,11 @@ export default function InternalTelecomPage() {
     peerConnection.ontrack = (event) => {
       addRtcLog('remote track received');
       console.log('Remote stream reçu', event.streams);
-      const remoteStream = event.streams[0] || new MediaStream([event.track]);
+      if (!remoteStreamRef.current) {
+        remoteStreamRef.current = new MediaStream();
+      }
+      remoteStreamRef.current.addTrack(event.track);
+      const remoteStream = event.streams[0] || remoteStreamRef.current;
       attachRemoteStream(remoteStream);
     };
 
@@ -692,7 +703,7 @@ export default function InternalTelecomPage() {
       if (['failed', 'disconnected'].includes(peerConnection.connectionState)) {
         setCallUiStatus('failed');
         setLastWebRtcError('WebRTC failed/disconnected');
-        setRtcWarning('Connexion audio impossible. Un serveur TURN sera nécessaire pour certains réseaux.');
+        setRtcWarning('Connexion audio impossible sur ce réseau. Serveur TURN requis.');
       }
     };
 
@@ -707,7 +718,7 @@ export default function InternalTelecomPage() {
       addRtcLog(`iceConnectionState: ${peerConnection.iceConnectionState}`);
       if (['failed', 'disconnected'].includes(peerConnection.iceConnectionState)) {
         setCallUiStatus('failed');
-        setRtcWarning('Connexion audio échouée — réseau bloqué (TURN requis)');
+        setRtcWarning('Connexion audio impossible sur ce réseau. Serveur TURN requis.');
       }
     };
 
@@ -742,7 +753,7 @@ export default function InternalTelecomPage() {
       if (signal.receiverAnswer && !callerAnswerAppliedRef.current) {
         await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.receiverAnswer));
         callerAnswerAppliedRef.current = true;
-        setAnswerWritten(true);
+        setAnswerReceived(true);
         addRtcLog('answer received');
         setCallUiStatus('connecting');
       }
@@ -760,7 +771,7 @@ export default function InternalTelecomPage() {
         addRtcLog('offer received');
         await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.callerOffer));
         receiverOfferAppliedRef.current = true;
-        setOfferWritten(true);
+        setOfferReceived(true);
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
         await saveReceiverAnswer(callId, answer);
@@ -1039,7 +1050,9 @@ export default function InternalTelecomPage() {
             <DebugPill label="Connection" value={connectionState} ok={connectionState === 'connected'} warn={connectionState === 'connecting'} />
             <DebugPill label="Signaling" value={signalingState} ok={signalingState === 'stable'} warn={signalingState !== 'stable'} />
             <DebugPill label="Offer written" value={offerWritten ? 'yes' : 'no'} ok={offerWritten} />
+            <DebugPill label="Offer received" value={offerReceived ? 'yes' : 'no'} ok={offerReceived} />
             <DebugPill label="Answer written" value={answerWritten ? 'yes' : 'no'} ok={answerWritten} />
+            <DebugPill label="Answer received" value={answerReceived ? 'yes' : 'no'} ok={answerReceived} />
             <DebugPill label="Local ICE" value={String(localCandidateCount)} ok={localCandidateCount > 0} />
             <DebugPill label="Remote ICE" value={String(remoteCandidateCount)} ok={remoteCandidateCount > 0} />
             <DebugPill label="Audio play" value={audioPlayStatus} ok={audioPlayStatus === 'Lecture OK'} warn={audioPlayStatus === 'Bloquee'} />

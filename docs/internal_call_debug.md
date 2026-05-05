@@ -161,13 +161,44 @@ NEXT_PUBLIC_TURN_CREDENTIAL=
 
 - Si l'audio distant ne demarre pas, cliquer une fois dans la page: certains navigateurs bloquent l'autoplay.
 - Les notifications push exigent `NEXT_PUBLIC_FIREBASE_VAPID_KEY` et l'autorisation utilisateur.
-- Si `ICE state` reste `failed` ou `disconnected` plusieurs secondes, configurer TURN:
+- Si `ICE state` reste `failed` ou `disconnected` plusieurs secondes, ne pas continuer a modifier WebRTC; preparer TURN:
 
 ```env
 NEXT_PUBLIC_TURN_URL=
 NEXT_PUBLIC_TURN_USERNAME=
 NEXT_PUBLIC_TURN_CREDENTIAL=
 ```
+
+### Checklist voix WebRTC (A <-> B)
+
+Pendant l'appel dans `/telecom`, verifier:
+
+- `Micro local`
+- `Local tracks`
+- `Offer written`
+- `Offer received`
+- `Answer written`
+- `Answer received`
+- `Local ICE`
+- `Remote ICE`
+- `Remote stream`
+- `Remote tracks`
+- `ICE state`
+- `Connection`
+- `Signaling`
+- `Audio play`
+
+Attendu pour voix bidirectionnelle:
+
+- A et B ont `Micro local: OK`
+- `Offer written/received: yes`
+- `Answer written/received: yes`
+- `Local ICE > 0` et `Remote ICE > 0`
+- `Remote stream: Recu`
+- `Remote tracks > 0`
+- `Connection: connected`
+- `ICE state: connected` ou `completed`
+- `Audio play: Lecture OK`
 
 ## Verifications executees
 
