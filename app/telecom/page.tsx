@@ -96,6 +96,8 @@ export default function InternalTelecomPage() {
   const [answerReceived, setAnswerReceived] = useState(false);
   const [localCandidateCount, setLocalCandidateCount] = useState(0);
   const [remoteCandidateCount, setRemoteCandidateCount] = useState(0);
+  const [turnConfigured, setTurnConfigured] = useState(false);
+  const [iceServersCount, setIceServersCount] = useState(0);
   const [audioPlayStatus, setAudioPlayStatus] = useState('En attente');
   const [lastWebRtcError, setLastWebRtcError] = useState('');
   const [ringtoneBlocked, setRingtoneBlocked] = useState(false);
@@ -485,7 +487,14 @@ export default function InternalTelecomPage() {
       selectedConversationId,
       (items) => {
         setMessages(items);
-        void markMessageAsRead(selectedConversationId, user.uid);
+        void markMessageAsRead(selectedConversationId, user.uid).catch((error) => {
+          console.error('[Listener error] markMessageAsRead', {
+            conversationId: selectedConversationId,
+            currentUserUid: user.uid,
+            telecomNumber: user.telecomNumber,
+            error,
+          });
+        });
       },
       (error) => {
         console.error('[Listener error] subscribeConversationMessages', {
@@ -533,6 +542,8 @@ export default function InternalTelecomPage() {
     setAnswerReceived(false);
     setLocalCandidateCount(0);
     setRemoteCandidateCount(0);
+    setTurnConfigured(false);
+    setIceServersCount(0);
     setAudioPlayStatus('En attente');
     setLastWebRtcError('');
     if (remoteAudioRef.current) {
@@ -658,7 +669,15 @@ export default function InternalTelecomPage() {
     receiverOfferAppliedRef.current = false;
     receiverAnswerSentRef.current = false;
 
-    const peerConnection = new RTCPeerConnection({ iceServers: getWebRtcIceServers() });
+    const iceServers = getWebRtcIceServers();
+    const hasTurn = Boolean(
+      process.env.NEXT_PUBLIC_TURN_URL &&
+      process.env.NEXT_PUBLIC_TURN_USERNAME &&
+      process.env.NEXT_PUBLIC_TURN_CREDENTIAL
+    );
+    setTurnConfigured(hasTurn);
+    setIceServersCount(iceServers.length);
+    const peerConnection = new RTCPeerConnection({ iceServers });
     peerConnectionRef.current = peerConnection;
     peerConnection.addTransceiver('audio', { direction: 'sendrecv' });
     setIceState(peerConnection.iceConnectionState);
@@ -1055,6 +1074,8 @@ export default function InternalTelecomPage() {
             <DebugPill label="Answer received" value={answerReceived ? 'yes' : 'no'} ok={answerReceived} />
             <DebugPill label="Local ICE" value={String(localCandidateCount)} ok={localCandidateCount > 0} />
             <DebugPill label="Remote ICE" value={String(remoteCandidateCount)} ok={remoteCandidateCount > 0} />
+            <DebugPill label="TURN configured" value={turnConfigured ? 'yes' : 'no'} ok={turnConfigured} warn={!turnConfigured} />
+            <DebugPill label="ICE servers count" value={String(iceServersCount)} ok={iceServersCount >= 2} />
             <DebugPill label="Audio play" value={audioPlayStatus} ok={audioPlayStatus === 'Lecture OK'} warn={audioPlayStatus === 'Bloquee'} />
             <DebugPill label="Sonnerie" value={ringtoneActive ? 'Active' : ringtoneBlocked ? 'Bloquee' : 'Inactive'} ok={ringtoneActive} warn={ringtoneBlocked} />
             <DebugPill label="Remote stream" value={remoteStreamReceived ? 'Reçu' : 'En attente'} ok={remoteStreamReceived} />
