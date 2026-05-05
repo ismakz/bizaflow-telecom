@@ -14,11 +14,21 @@
 
 .internal-telecom-grid {
   display: grid;
-  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: minmax(300px, 400px) minmax(420px, 1fr);
+  gap: 16px;
+  align-items: stretch;
 }
 
-@media (max-width: 820px) {
+.page-container.telecom-page-container {
+  max-width: 1180px;
+  width: 100%;
+}
+
+@media (max-width: 900px) {
+  .page-container.telecom-page-container {
+    max-width: 480px;
+  }
+
   .internal-telecom-grid {
     grid-template-columns: 1fr;
   }

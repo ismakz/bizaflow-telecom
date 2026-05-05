@@ -273,7 +273,7 @@ export default function InternalTelecomPage() {
   if (!user) return null;
 
   return (
-    <div className="page-container" style={{ paddingBottom: 92 }}>
+    <div className="page-container telecom-page-container" style={{ paddingBottom: 92 }}>
       <div className="glow-bg" />
 
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 16 }}>
@@ -373,14 +373,14 @@ export default function InternalTelecomPage() {
         <section style={{ ...cardStyle, minHeight: 520, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           {selectedContact ? (
             <>
-              <div style={{ padding: 14, borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', gap: 12 }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 900 }}>{selectedContact.name}</div>
+              <div style={{ padding: 14, borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <div style={{ flex: '1 1 220px', minWidth: 0 }}>
+                  <div style={{ fontWeight: 900, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selectedContact.name}</div>
                   <div style={{ color: '#64748b', fontSize: '0.74rem' }}>
                     {selectedContact.telecomNumber} · {statusLabels[selectedContact.presenceStatus]}
                   </div>
                 </div>
-                <button onClick={callSelected} className="btn-primary" style={{ width: 'auto', padding: '10px 14px' }}>
+                <button onClick={callSelected} className="btn-primary" style={{ width: 'auto', padding: '10px 14px', flexShrink: 0, whiteSpace: 'nowrap' }}>
                   Appel audio
                 </button>
               </div>
@@ -412,7 +412,7 @@ export default function InternalTelecomPage() {
                 })}
               </div>
 
-              <div style={{ padding: 12, borderTop: '1px solid rgba(255,255,255,0.06)', display: 'flex', gap: 8 }}>
+              <div style={{ padding: 12, borderTop: '1px solid rgba(255,255,255,0.06)', display: 'flex', gap: 8, alignItems: 'center' }}>
                 <input
                   className="input-field"
                   value={messageBody}
@@ -424,12 +424,13 @@ export default function InternalTelecomPage() {
                     }
                   }}
                   placeholder="Message interne..."
+                  style={{ minWidth: 0 }}
                 />
                 <button
                   onClick={sendMessage}
                   disabled={!messageBody.trim() || sending}
                   className="btn-primary"
-                  style={{ width: 110, opacity: !messageBody.trim() || sending ? 0.55 : 1 }}
+                  style={{ width: 112, flex: '0 0 112px', opacity: !messageBody.trim() || sending ? 0.55 : 1, whiteSpace: 'nowrap' }}
                 >
                   Envoyer
                 </button>
