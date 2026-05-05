@@ -334,6 +334,13 @@ export default function InternalTelecomPage() {
   useEffect(() => {
     if (!user) return;
     incomingMessagesInitializedRef.current = false;
+    console.log('[Listener subscribe] incoming_messages', {
+      listener: 'subscribeIncomingMessages',
+      collection: 'telecom_messages',
+      query: { receiverId: user.uid },
+      currentUserUid: user.uid,
+      telecomNumber: user.telecomNumber,
+    });
     const unsub = subscribeIncomingMessages(
       user.uid,
       (items) => {
@@ -355,6 +362,13 @@ export default function InternalTelecomPage() {
         });
       },
       (error) => {
+        console.error('[Listener error] subscribeIncomingMessages', {
+          collection: 'telecom_messages',
+          query: { receiverId: user.uid },
+          currentUserUid: user.uid,
+          telecomNumber: user.telecomNumber,
+          error,
+        });
         if (error instanceof FirebaseError && error.code === 'permission-denied') {
           showToast({ message: 'Permission refusée: notifications messages indisponibles.', variant: 'error' });
         }
@@ -365,12 +379,40 @@ export default function InternalTelecomPage() {
 
   useEffect(() => {
     if (!user) return;
+    console.log('[Listener subscribe] internal_users', {
+      listener: 'subscribeInternalUsers',
+      collection: 'telecom_users + telecom_presence',
+      query: { status: 'approved' },
+      currentUserUid: user.uid,
+      telecomNumber: user.telecomNumber,
+    });
     const unsubUsers = subscribeInternalUsers(user.uid, (items) => {
       setContacts(items);
       setSelectedUserId((current) => current || items[0]?.uid || '');
     });
+    console.log('[Listener subscribe] user_conversations', {
+      listener: 'subscribeUserConversations',
+      collection: 'telecom_conversations',
+      query: { participantIdsArrayContains: user.uid },
+      currentUserUid: user.uid,
+      telecomNumber: user.telecomNumber,
+    });
     const unsubConversations = subscribeUserConversations(user.uid, setConversations);
+    console.log('[Listener subscribe] incoming_internal_calls', {
+      listener: 'subscribeIncomingInternalCalls',
+      collection: 'telecom_internal_calls',
+      query: { receiverId: user.uid, status: 'ringing' },
+      currentUserUid: user.uid,
+      telecomNumber: user.telecomNumber,
+    });
     const unsubIncoming = subscribeIncomingInternalCalls(user.uid, setIncomingCalls);
+    console.log('[Listener subscribe] recent_internal_calls', {
+      listener: 'subscribeRecentInternalCalls',
+      collection: 'telecom_internal_calls',
+      query: { participantsArrayContains: user.uid },
+      currentUserUid: user.uid,
+      telecomNumber: user.telecomNumber,
+    });
     const unsubCalls = subscribeRecentInternalCalls(user.uid, setRecentCalls);
     return () => {
       unsubUsers();
@@ -385,6 +427,13 @@ export default function InternalTelecomPage() {
       setMessages([]);
       return;
     }
+    console.log('[Listener subscribe] conversation_messages', {
+      listener: 'subscribeConversationMessages',
+      collection: 'telecom_messages',
+      query: { conversationId: selectedConversationId },
+      currentUserUid: user.uid,
+      telecomNumber: user.telecomNumber,
+    });
     const unsub = subscribeConversationMessages(
       selectedConversationId,
       (items) => {
@@ -392,6 +441,13 @@ export default function InternalTelecomPage() {
         void markMessageAsRead(selectedConversationId, user.uid);
       },
       (error) => {
+        console.error('[Listener error] subscribeConversationMessages', {
+          collection: 'telecom_messages',
+          query: { conversationId: selectedConversationId },
+          currentUserUid: user.uid,
+          telecomNumber: user.telecomNumber,
+          error,
+        });
         if (error instanceof FirebaseError && error.code === 'permission-denied') {
           showToast({ message: 'Permission refusée: accès aux messages interdit.', variant: 'error' });
           return;
@@ -459,6 +515,13 @@ export default function InternalTelecomPage() {
 
   useEffect(() => {
     if (!activeCall?.id) return;
+    console.log('[Listener subscribe] internal_call', {
+      listener: 'subscribeInternalCall',
+      collection: 'telecom_internal_calls',
+      query: { id: activeCall.id },
+      currentUserUid: user?.uid,
+      telecomNumber: user?.telecomNumber,
+    });
     const unsub = subscribeInternalCall(activeCall.id, (freshCall) => {
       if (!freshCall) return;
       setActiveCall(freshCall);
