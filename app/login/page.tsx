@@ -43,8 +43,15 @@ export default function LoginPage() {
         }
 
         setStatusMessage('Création du compte...');
-        await signUp(email, password, name.trim());
-        // AppProvider will detect pending status and redirect to /pending
+        const createdUser = await signUp(email.trim().toLowerCase(), password.trim(), name.trim());
+        const createdProfile = await getTelecomUser(createdUser.uid);
+        if (createdProfile?.status === 'approved' && createdProfile.role === 'ceo') {
+          router.push('/ceo');
+        } else if (createdProfile?.status === 'approved') {
+          router.push('/');
+        } else {
+          router.push('/pending');
+        }
       } else {
         setStatusMessage('Connexion en cours...');
         await signIn(email.trim().toLowerCase(), password.trim());
