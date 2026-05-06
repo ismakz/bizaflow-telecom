@@ -207,19 +207,53 @@ export function subscribeInternalUsers(
 
 export function subscribeUserConversations(
   userId: string,
-  callback: (conversations: TelecomConversation[]) => void
+  callback: (conversations: TelecomConversation[]) => void,
+  onError?: (error: Error) => void
 ): Unsubscribe {
-  const conversationsQuery = query(
+  const byParticipantIdsQuery = query(
     collection(db, 'telecom_conversations'),
     where('participantIds', 'array-contains', userId)
   );
-  return onSnapshot(conversationsQuery, (snap) => {
+  const byParticipantsQuery = query(
+    collection(db, 'telecom_conversations'),
+    where('participants', 'array-contains', userId)
+  );
+
+  let byParticipantIds: TelecomConversation[] = [];
+  let byParticipants: TelecomConversation[] = [];
+
+  const emit = () => {
+    const merged = new Map<string, TelecomConversation>();
+    [...byParticipantIds, ...byParticipants].forEach((conversation) => {
+      merged.set(conversation.id, conversation);
+    });
     callback(
-      snap.docs
-        .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() } as TelecomConversation))
-        .sort((a, b) => (b.lastMessageAt?.seconds || 0) - (a.lastMessageAt?.seconds || 0))
+      [...merged.values()].sort((a, b) => (b.lastMessageAt?.seconds || 0) - (a.lastMessageAt?.seconds || 0))
     );
-  });
+  };
+
+  const unsubParticipantIds = onSnapshot(
+    byParticipantIdsQuery,
+    (snap) => {
+      byParticipantIds = snap.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() } as TelecomConversation));
+      emit();
+    },
+    (error) => onError?.(error)
+  );
+
+  const unsubParticipants = onSnapshot(
+    byParticipantsQuery,
+    (snap) => {
+      byParticipants = snap.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() } as TelecomConversation));
+      emit();
+    },
+    (error) => onError?.(error)
+  );
+
+  return () => {
+    unsubParticipantIds();
+    unsubParticipants();
+  };
 }
 
 export function subscribeConversationMessages(
