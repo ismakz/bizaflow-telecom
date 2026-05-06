@@ -53,6 +53,10 @@ export interface TelecomMessage {
   conversationId: string;
   senderId: string;
   receiverId: string;
+  senderUserId?: string;
+  targetUserId?: string;
+  from?: string;
+  to?: string;
   body: string;
   type?: TelecomMessageType;
   mediaUrl?: string | null;
@@ -67,6 +71,116 @@ export interface TelecomMessage {
   editedAt?: Timestamp | null;
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
+}
+
+export function subscribeDirectConversationMessages(input: {
+  currentUserUid: string;
+  currentUserTelecomNumber?: string;
+  peerUid?: string;
+  peerTelecomNumber?: string;
+  conversationId?: string;
+  limitCount?: number;
+  callback: (messages: TelecomMessage[]) => void;
+  onError?: (error: Error, queryMeta: Record<string, unknown>) => void;
+}): Unsubscribe {
+  const limitCount = input.limitCount || 40;
+  const unsubs: Unsubscribe[] = [];
+  const buckets: TelecomMessage[][] = [];
+
+  const emit = () => {
+    const merged = new Map<string, TelecomMessage>();
+    buckets.flat().forEach((m) => merged.set(m.id, m));
+    input.callback(
+      [...merged.values()].sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0))
+    );
+  };
+
+  const addQuery = (idx: number, queryMeta: Record<string, unknown>, q: ReturnType<typeof query>) => {
+    buckets[idx] = [];
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        buckets[idx] = snap.docs.map((docSnap) => {
+          const data = docSnap.data() as Record<string, unknown>;
+          return { id: docSnap.id, ...data } as TelecomMessage;
+        });
+        emit();
+      },
+      (error) => {
+        input.onError?.(error, queryMeta);
+      }
+    );
+    unsubs.push(unsub);
+  };
+
+  let idx = 0;
+  if (input.peerUid) {
+    addQuery(
+      idx++,
+      { where: [{ senderId: input.currentUserUid }, { receiverId: input.peerUid }], orderBy: 'createdAt desc', limit: limitCount },
+      query(
+        collection(db, 'telecom_messages'),
+        where('senderId', '==', input.currentUserUid),
+        where('receiverId', '==', input.peerUid),
+        orderBy('createdAt', 'desc'),
+        limit(limitCount)
+      )
+    );
+    addQuery(
+      idx++,
+      { where: [{ senderId: input.peerUid }, { receiverId: input.currentUserUid }], orderBy: 'createdAt desc', limit: limitCount },
+      query(
+        collection(db, 'telecom_messages'),
+        where('senderId', '==', input.peerUid),
+        where('receiverId', '==', input.currentUserUid),
+        orderBy('createdAt', 'desc'),
+        limit(limitCount)
+      )
+    );
+  }
+
+  if (input.currentUserTelecomNumber && input.peerTelecomNumber) {
+    addQuery(
+      idx++,
+      { where: [{ from: input.currentUserTelecomNumber }, { to: input.peerTelecomNumber }], orderBy: 'createdAt desc', limit: limitCount },
+      query(
+        collection(db, 'telecom_messages'),
+        where('from', '==', input.currentUserTelecomNumber),
+        where('to', '==', input.peerTelecomNumber),
+        orderBy('createdAt', 'desc'),
+        limit(limitCount)
+      )
+    );
+    addQuery(
+      idx++,
+      { where: [{ from: input.peerTelecomNumber }, { to: input.currentUserTelecomNumber }], orderBy: 'createdAt desc', limit: limitCount },
+      query(
+        collection(db, 'telecom_messages'),
+        where('from', '==', input.peerTelecomNumber),
+        where('to', '==', input.currentUserTelecomNumber),
+        orderBy('createdAt', 'desc'),
+        limit(limitCount)
+      )
+    );
+  }
+
+  if (input.conversationId && input.peerUid) {
+    addQuery(
+      idx++,
+      { where: [{ conversationId: input.conversationId }, { senderId_in: [input.currentUserUid, input.peerUid] }], orderBy: 'createdAt desc', limit: limitCount },
+      query(
+        collection(db, 'telecom_messages'),
+        where('conversationId', '==', input.conversationId),
+        where('senderId', 'in', [input.currentUserUid, input.peerUid]),
+        orderBy('createdAt', 'desc'),
+        limit(limitCount)
+      )
+    );
+  }
+
+  return () => {
+    unsubs.forEach((unsub) => unsub());
+  };
 }
 
 export interface TelecomInternalCall {

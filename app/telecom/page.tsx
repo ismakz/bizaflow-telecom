@@ -11,7 +11,7 @@ import {
   sendInternalMessage,
   setMessageReaction,
   setTypingState,
-  subscribeConversationMessages,
+  subscribeDirectConversationMessages,
   subscribeIncomingMessages,
   subscribeInternalUsers,
   subscribeTypingState,
@@ -65,6 +65,7 @@ export default function SmsPage() {
   const typingTimeoutRef = useRef<number | null>(null);
   const incomingMessagesInitializedRef = useRef(false);
   const notifiedMessageIdsRef = useRef<Set<string>>(new Set());
+  const conversationErrorToastShownRef = useRef(false);
 
   const selectedContact = useMemo(
     () => contacts.find((contact) => contact.uid === selectedUserId) || null,
@@ -90,6 +91,19 @@ export default function SmsPage() {
       if (isMobile) setShowConversationMobile(true);
     }
   }, [isMobile, searchParams]);
+
+  useEffect(() => {
+    if (!contacts.length || !selectedUserId) return;
+    const normalized = selectedUserId.trim().toLowerCase();
+    const found = contacts.find((contact) =>
+      [contact.uid, String((contact as { id?: string }).id || ''), String((contact as { userId?: string }).userId || ''), contact.telecomNumber]
+        .map((value) => value.toLowerCase())
+        .includes(normalized)
+    );
+    if (found && found.uid !== selectedUserId) {
+      setSelectedUserId(found.uid);
+    }
+  }, [contacts, selectedUserId]);
 
   useEffect(() => {
     if (!user) return;
@@ -254,31 +268,40 @@ export default function SmsPage() {
       setMessages([]);
       return;
     }
-    const unsub = subscribeConversationMessages(
-      selectedConversationId,
-      (items) => {
+    conversationErrorToastShownRef.current = false;
+    const unsub = subscribeDirectConversationMessages({
+      currentUserUid: user.uid,
+      currentUserTelecomNumber: user.telecomNumber,
+      peerUid: selectedContact?.uid,
+      peerTelecomNumber: selectedContact?.telecomNumber,
+      conversationId: selectedConversationId,
+      limitCount: messageLimit,
+      callback: (items) => {
         setMessages(items);
         void markConversationMessagesDelivered(selectedConversationId, user.uid).catch(() => undefined);
         void markMessageAsRead(selectedConversationId, user.uid).catch(() => undefined);
       },
-      (error) => {
+      onError: (error, queryMeta) => {
         console.error('[SMS LISTENER ERROR]', {
           collection: 'telecom_messages',
-          query: { conversationId: selectedConversationId },
+          whereOrderBy: queryMeta,
+          conversationId: selectedConversationId,
           uid: user.uid,
           telecomNumber: user.telecomNumber,
+          selectedContactUid: selectedContact?.uid || null,
+          selectedContactTelecomNumber: selectedContact?.telecomNumber || null,
+          errorCode: error instanceof FirebaseError ? error.code : 'unknown',
+          errorMessage: error instanceof Error ? error.message : String(error),
           error,
         });
-        if (error instanceof FirebaseError && error.code === 'permission-denied') {
+        if (!conversationErrorToastShownRef.current) {
+          conversationErrorToastShownRef.current = true;
           setNotificationStatus('Accès conversation refusé. Vérifiez les permissions de ce chat.');
-          return;
         }
-        showToast({ message: 'Lecture des messages impossible', variant: 'error' });
       },
-      messageLimit
-    );
+    });
     return () => unsub();
-  }, [messageLimit, selectedConversationId, showToast, user]);
+  }, [messageLimit, selectedContact?.telecomNumber, selectedContact?.uid, selectedConversationId, user]);
 
   useEffect(() => {
     if (!selectedContact || !selectedConversationId) {
