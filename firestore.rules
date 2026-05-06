@@ -192,8 +192,23 @@ service cloud.firestore {
     // Important: lecture pour users, écriture CEO seulement
     // =========================
     match /telecom_config/{doc} {
-      allow read: if isApproved();
-      allow write: if isCEO();
+      allow read: if isApproved() || (isAuth() && doc == "counter");
+      allow create: if isCEO() || (
+        doc == "counter" &&
+        isAuth() &&
+        request.resource.data.keys().hasOnly(["lastNumber"]) &&
+        request.resource.data.lastNumber is int &&
+        request.resource.data.lastNumber >= 10001
+      );
+      allow update: if isCEO() || (
+        doc == "counter" &&
+        isAuth() &&
+        resource.data.lastNumber is int &&
+        request.resource.data.keys().hasOnly(["lastNumber"]) &&
+        request.resource.data.lastNumber is int &&
+        request.resource.data.lastNumber == resource.data.lastNumber + 1
+      );
+      allow delete: if isCEO();
     }
 
     match /telecom_internal_settings/{doc} {

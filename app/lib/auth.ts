@@ -19,12 +19,16 @@ import { createTelecomUser, getTelecomUser } from './firestore';
 export async function signUp(email: string, password: string, name: string) {
   const credential = await createUserWithEmailAndPassword(auth, email, password);
   const user = credential.user;
-
-  // Update display name
-  await updateProfile(user, { displayName: name });
-
-  // Create telecom profile in Firestore
-  await createTelecomUser(user.uid, name, email);
+  try {
+    // Update display name
+    await updateProfile(user, { displayName: name });
+    // Create telecom profile in Firestore
+    await createTelecomUser(user.uid, name, email);
+  } catch (error) {
+    // Roll back auth account if Firestore profile creation fails.
+    await user.delete().catch(() => undefined);
+    throw new Error(`SIGNUP_PROFILE_CREATE_FAILED:${error instanceof Error ? error.message : 'UNKNOWN'}`);
+  }
 
   return user;
 }

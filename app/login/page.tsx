@@ -108,6 +108,8 @@ export default function LoginPage() {
         setError('Profil incomplet. Veuillez contacter l’administration.');
       } else if (message.includes('AUTH_SUCCESS_BUT_NO_CURRENT_USER')) {
         setError('Session invalide après connexion. Réessayez.');
+      } else if (message.includes('SIGNUP_PROFILE_CREATE_FAILED')) {
+        setError(`Inscription impossible: profil Firestore non créé${technicalHint}`);
       } else {
         setError(`Connexion refusee${technicalHint}`);
       }
