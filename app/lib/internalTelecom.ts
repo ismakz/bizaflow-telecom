@@ -41,6 +41,9 @@ export interface InternalTelecomUser {
 export interface TelecomConversation {
   id: string;
   participantIds: string[];
+  participantNumbers?: string[];
+  participants?: string[];
+  participantsMeta?: Record<string, { uid: string; telecomNumber: string }>;
   lastMessage: string;
   lastMessageAt: Timestamp | null;
   unreadCountByUser: Record<string, number>;
@@ -57,6 +60,8 @@ export interface TelecomMessage {
   targetUserId?: string;
   from?: string;
   to?: string;
+  participantIds?: string[];
+  participantNumbers?: string[];
   body: string;
   type?: TelecomMessageType;
   mediaUrl?: string | null;
@@ -513,6 +518,9 @@ export async function sendInternalMessage(input: {
     conversationRef,
     {
       participantIds: [input.senderId, input.receiverId].sort(),
+      participants: [input.senderId, input.receiverId].sort(),
+      participantNumbers: [],
+      participantsMeta: {},
       lastMessage: body || `[${input.type || 'text'}]`,
       lastMessageAt: now,
       [`unreadCountByUser.${input.senderId}`]: 0,
@@ -527,7 +535,13 @@ export async function sendInternalMessage(input: {
     conversationId,
     senderId: input.senderId,
     receiverId: input.receiverId,
+    senderUserId: input.senderId,
+    targetUserId: input.receiverId,
     body,
+    from: null,
+    to: null,
+    participantIds: [input.senderId, input.receiverId].sort(),
+    participantNumbers: [],
     type: input.type || 'text',
     mediaUrl: input.mediaUrl || null,
     mediaName: input.mediaName || null,
@@ -541,6 +555,66 @@ export async function sendInternalMessage(input: {
   });
 
   return messageRef.id;
+}
+
+export async function enrichConversationParticipantsMeta(input: {
+  currentUserUid: string;
+  currentUserTelecomNumber?: string;
+  peerUid?: string;
+  peerTelecomNumber?: string;
+}): Promise<void> {
+  if (!input.currentUserUid || !input.peerUid) return;
+  const conversationId = conversationIdFor(input.currentUserUid, input.peerUid);
+  await setDoc(
+    doc(db, 'telecom_conversations', conversationId),
+    {
+      participantIds: [input.currentUserUid, input.peerUid].sort(),
+      participants: [input.currentUserUid, input.peerUid].sort(),
+      participantNumbers: [input.currentUserTelecomNumber || '', input.peerTelecomNumber || ''].filter(Boolean).sort(),
+      participantsMeta: {
+        [input.currentUserUid]: {
+          uid: input.currentUserUid,
+          telecomNumber: input.currentUserTelecomNumber || '',
+        },
+        [input.peerUid]: {
+          uid: input.peerUid,
+          telecomNumber: input.peerTelecomNumber || '',
+        },
+      },
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+export async function backfillMessageParticipantMeta(input: {
+  conversationId: string;
+  currentUserUid: string;
+  currentUserTelecomNumber?: string;
+  peerUid?: string;
+  peerTelecomNumber?: string;
+}): Promise<void> {
+  if (!input.conversationId || !input.currentUserUid || !input.peerUid) return;
+  const snap = await getDocs(
+    query(
+      collection(db, 'telecom_messages'),
+      where('conversationId', '==', input.conversationId),
+      limit(30)
+    )
+  );
+  await Promise.all(
+    snap.docs.map(async (docSnap) => {
+      const data = docSnap.data() as TelecomMessage;
+      const needsParticipantIds = !Array.isArray(data.participantIds) || data.participantIds.length === 0;
+      const needsParticipantNumbers = !Array.isArray(data.participantNumbers);
+      if (!needsParticipantIds && !needsParticipantNumbers) return;
+      await updateDoc(doc(db, 'telecom_messages', docSnap.id), {
+        participantIds: [input.currentUserUid, input.peerUid as string].sort(),
+        participantNumbers: [input.currentUserTelecomNumber || '', input.peerTelecomNumber || ''].filter(Boolean).sort(),
+        updatedAt: serverTimestamp(),
+      });
+    })
+  );
 }
 
 export async function setMessageReaction(input: {

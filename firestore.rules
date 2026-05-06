@@ -57,6 +57,10 @@ service cloud.firestore {
       return listValue is list && request.auth.uid in listValue;
     }
 
+    function numberInParticipants(listValue) {
+      return listValue is list && myTelecomNumber() in listValue;
+    }
+
     function messageConversationMatches(data) {
       return (
         conversationDoc(data.conversationId).participantIds is list &&
@@ -259,7 +263,8 @@ service cloud.firestore {
       allow read: if isCEO() || (
         isApproved() && (
           uidInParticipants(resource.data.participantIds) ||
-          uidInParticipants(resource.data.participants)
+          uidInParticipants(resource.data.participants) ||
+          numberInParticipants(resource.data.participantNumbers)
         )
       );
 
@@ -268,9 +273,15 @@ service cloud.firestore {
         && request.auth.uid in request.resource.data.participantIds;
 
       allow update: if isCEO() || (
-        isParticipant(resource.data.participantIds)
-        && request.resource.data.participantIds == resource.data.participantIds
-        && conversationIdMatches(conversationId, request.resource.data.participantIds)
+        (
+          uidInParticipants(resource.data.participantIds) ||
+          uidInParticipants(resource.data.participants) ||
+          numberInParticipants(resource.data.participantNumbers)
+        )
+        && (
+          request.resource.data.participantIds == resource.data.participantIds ||
+          request.resource.data.participants == resource.data.participants
+        )
       );
 
       allow delete: if isCEO();
@@ -290,13 +301,15 @@ service cloud.firestore {
           resource.data.from == myTelecomNumber() ||
           resource.data.to == myTelecomNumber() ||
           uidInParticipants(resource.data.participantIds) ||
+          numberInParticipants(resource.data.participantNumbers) ||
           uidInParticipants(resource.data.participants) ||
           (
             resource.data.conversationId is string &&
             conversationExists(resource.data.conversationId) &&
             (
               uidInParticipants(conversationDoc(resource.data.conversationId).participantIds) ||
-              uidInParticipants(conversationDoc(resource.data.conversationId).participants)
+              uidInParticipants(conversationDoc(resource.data.conversationId).participants) ||
+              numberInParticipants(conversationDoc(resource.data.conversationId).participantNumbers)
             )
           )
         )
