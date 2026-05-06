@@ -307,16 +307,37 @@ service cloud.firestore {
         && request.resource.data.receiverId is string
         && request.resource.data.receiverId != request.auth.uid
         && request.resource.data.body is string
-        && request.resource.data.body.size() > 0
+        && (
+          request.resource.data.body.size() > 0 ||
+          request.resource.data.mediaUrl is string
+        )
         && request.resource.data.body.size() <= 2000
         && request.resource.data.conversationId is string
         && messageConversationMatches(request.resource.data);
 
       allow update: if isCEO() || (
         isApproved()
-        && resource.data.receiverId == request.auth.uid
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt", "deliveredAt", "readAt"])
-        && request.resource.data.status in ["delivered", "read"]
+        && (
+          (
+            resource.data.receiverId == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt", "deliveredAt", "readAt"])
+            && request.resource.data.status in ["delivered", "read"]
+          ) ||
+          (
+            resource.data.senderId == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["body", "editedAt", "updatedAt"])
+            && request.resource.data.body is string
+            && request.resource.data.body.size() > 0
+            && request.resource.data.body.size() <= 2000
+          ) ||
+          (
+            (
+              uidInParticipants(conversationDoc(resource.data.conversationId).participantIds) ||
+              uidInParticipants(conversationDoc(resource.data.conversationId).participants)
+            )
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["reactionsByUser", "updatedAt"])
+          )
+        )
       );
 
       allow delete: if isCEO();

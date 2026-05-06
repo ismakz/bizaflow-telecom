@@ -23,6 +23,7 @@ import type { UserRole, UserStatus } from '@/app/lib/types';
 
 export type PresenceStatus = 'online' | 'offline' | 'busy' | 'in_call';
 export type MessageStatus = 'sent' | 'delivered' | 'read';
+export type TelecomMessageType = 'text' | 'image' | 'document' | 'audio';
 export type InternalCallStatus = 'ringing' | 'accepted' | 'declined' | 'missed' | 'completed' | 'failed';
 export type IceCandidateRole = 'caller' | 'receiver';
 
@@ -53,9 +54,17 @@ export interface TelecomMessage {
   senderId: string;
   receiverId: string;
   body: string;
+  type?: TelecomMessageType;
+  mediaUrl?: string | null;
+  mediaName?: string | null;
+  mediaMimeType?: string | null;
+  mediaSize?: number | null;
+  replyToMessageId?: string | null;
+  reactionsByUser?: Record<string, string>;
   status: MessageStatus;
   deliveredAt?: Timestamp | null;
   readAt?: Timestamp | null;
+  editedAt?: Timestamp | null;
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
 }
@@ -364,6 +373,12 @@ export async function sendInternalMessage(input: {
   senderId: string;
   receiverId: string;
   body: string;
+  type?: TelecomMessageType;
+  mediaUrl?: string | null;
+  mediaName?: string | null;
+  mediaMimeType?: string | null;
+  mediaSize?: number | null;
+  replyToMessageId?: string | null;
 }): Promise<string> {
   const settings = await getInternalSettings();
   if (!settings.internalMessagesEnabled) throw new Error('MESSAGES_INTERNAL_DISABLED');
@@ -371,7 +386,9 @@ export async function sendInternalMessage(input: {
   if (input.senderId === input.receiverId) throw new Error('MESSAGE_SELF_NOT_ALLOWED');
 
   const body = input.body.trim();
-  if (!body) throw new Error('MESSAGE_BODY_REQUIRED');
+  const isText = (input.type || 'text') === 'text';
+  if (isText && !body) throw new Error('MESSAGE_BODY_REQUIRED');
+  if (!isText && !input.mediaUrl) throw new Error('MESSAGE_MEDIA_REQUIRED');
   if (body.length > 2000) throw new Error('MESSAGE_BODY_TOO_LONG');
 
   const conversationId = conversationIdFor(input.senderId, input.receiverId);
@@ -382,7 +399,7 @@ export async function sendInternalMessage(input: {
     conversationRef,
     {
       participantIds: [input.senderId, input.receiverId].sort(),
-      lastMessage: body,
+      lastMessage: body || `[${input.type || 'text'}]`,
       lastMessageAt: now,
       [`unreadCountByUser.${input.senderId}`]: 0,
       [`unreadCountByUser.${input.receiverId}`]: increment(1),
@@ -397,12 +414,60 @@ export async function sendInternalMessage(input: {
     senderId: input.senderId,
     receiverId: input.receiverId,
     body,
+    type: input.type || 'text',
+    mediaUrl: input.mediaUrl || null,
+    mediaName: input.mediaName || null,
+    mediaMimeType: input.mediaMimeType || null,
+    mediaSize: input.mediaSize || null,
+    replyToMessageId: input.replyToMessageId || null,
+    reactionsByUser: {},
     status: 'sent',
     createdAt: now,
     updatedAt: now,
   });
 
   return messageRef.id;
+}
+
+export async function setMessageReaction(input: {
+  messageId: string;
+  userId: string;
+  emoji: string | null;
+}): Promise<void> {
+  const messageRef = doc(db, 'telecom_messages', input.messageId);
+  const snap = await getDoc(messageRef);
+  if (!snap.exists()) throw new Error('MESSAGE_NOT_FOUND');
+  const data = snap.data() as TelecomMessage;
+  const reactions = { ...(data.reactionsByUser || {}) };
+  if (!input.emoji) {
+    delete reactions[input.userId];
+  } else {
+    reactions[input.userId] = input.emoji;
+  }
+  await updateDoc(messageRef, {
+    reactionsByUser: reactions,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function editOwnMessage(input: {
+  messageId: string;
+  userId: string;
+  body: string;
+}): Promise<void> {
+  const messageRef = doc(db, 'telecom_messages', input.messageId);
+  const snap = await getDoc(messageRef);
+  if (!snap.exists()) throw new Error('MESSAGE_NOT_FOUND');
+  const data = snap.data() as TelecomMessage;
+  if (data.senderId !== input.userId) throw new Error('FORBIDDEN');
+  const body = input.body.trim();
+  if (!body) throw new Error('MESSAGE_BODY_REQUIRED');
+  if (body.length > 2000) throw new Error('MESSAGE_BODY_TOO_LONG');
+  await updateDoc(messageRef, {
+    body,
+    editedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
 }
 
 export async function markMessageAsRead(conversationId: string, userId: string): Promise<void> {
