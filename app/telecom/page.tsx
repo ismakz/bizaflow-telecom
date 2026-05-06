@@ -5,7 +5,9 @@ import { useSearchParams } from 'next/navigation';
 import { FirebaseError } from 'firebase/app';
 import { useApp } from '@/app/components/AppProvider';
 import {
+  backfillMessageParticipantMeta,
   conversationIdFor,
+  enrichConversationParticipantsMeta,
   markConversationMessagesDelivered,
   markMessageAsRead,
   sendInternalMessage,
@@ -66,6 +68,7 @@ export default function SmsPage() {
   const incomingMessagesInitializedRef = useRef(false);
   const notifiedMessageIdsRef = useRef<Set<string>>(new Set());
   const conversationErrorToastShownRef = useRef(false);
+  const incomingErrorToastShownRef = useRef(false);
 
   const selectedContact = useMemo(
     () => contacts.find((contact) => contact.uid === selectedUserId) || null,
@@ -224,8 +227,23 @@ export default function SmsPage() {
         });
       },
       (error) => {
+        console.error('[SMS LISTENER ERROR]', {
+          collection: 'telecom_messages',
+          whereOrderBy: { where: [{ receiverId: user.uid }], orderBy: 'createdAt desc' },
+          conversationId: null,
+          uid: user.uid,
+          telecomNumber: user.telecomNumber,
+          selectedContactUid: selectedContact?.uid || null,
+          selectedContactTelecomNumber: selectedContact?.telecomNumber || null,
+          errorCode: error instanceof FirebaseError ? error.code : 'unknown',
+          errorMessage: error instanceof Error ? error.message : String(error),
+          error,
+        });
         if (error instanceof FirebaseError && error.code === 'permission-denied') {
-          setNotificationStatus('Accès messages refusé. Vérifiez les permissions de votre compte.');
+          if (!incomingErrorToastShownRef.current) {
+            incomingErrorToastShownRef.current = true;
+            setNotificationStatus('Accès messages refusé. Vérifiez les permissions de votre compte.');
+          }
         }
       }
     );
@@ -278,6 +296,19 @@ export default function SmsPage() {
       limitCount: messageLimit,
       callback: (items) => {
         setMessages(items);
+        void enrichConversationParticipantsMeta({
+          currentUserUid: user.uid,
+          currentUserTelecomNumber: user.telecomNumber,
+          peerUid: selectedContact?.uid,
+          peerTelecomNumber: selectedContact?.telecomNumber,
+        }).catch(() => undefined);
+        void backfillMessageParticipantMeta({
+          conversationId: selectedConversationId,
+          currentUserUid: user.uid,
+          currentUserTelecomNumber: user.telecomNumber,
+          peerUid: selectedContact?.uid,
+          peerTelecomNumber: selectedContact?.telecomNumber,
+        }).catch(() => undefined);
         void markConversationMessagesDelivered(selectedConversationId, user.uid).catch(() => undefined);
         void markMessageAsRead(selectedConversationId, user.uid).catch(() => undefined);
       },
