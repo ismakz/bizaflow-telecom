@@ -6,11 +6,14 @@ import { FirebaseError } from 'firebase/app';
 import { useApp } from '@/app/components/AppProvider';
 import {
   conversationIdFor,
+  markConversationMessagesDelivered,
   markMessageAsRead,
   sendInternalMessage,
+  setTypingState,
   subscribeConversationMessages,
   subscribeIncomingMessages,
   subscribeInternalUsers,
+  subscribeTypingState,
   subscribeUserConversations,
   touchUserPresence,
   type InternalTelecomUser,
@@ -19,39 +22,15 @@ import {
 } from '@/app/lib/internalTelecom';
 import { auth } from '@/app/lib/firebase';
 import { onForegroundPushMessage, registerPushToken } from '@/app/lib/pushNotifications';
-import { formatTime, getInitials } from '@/app/lib/utils';
-
-const statusLabels = {
-  online: 'En ligne',
-  offline: 'Hors ligne',
-  busy: 'Occupé',
-  in_call: 'En appel',
-} as const;
-
-const statusColors = {
-  online: '#10b981',
-  offline: '#64748b',
-  busy: '#f59e0b',
-  in_call: '#06b6d4',
-} as const;
+import { ConversationList } from '@/app/telecom/components/ConversationList';
+import { ChatHeader } from '@/app/telecom/components/ChatHeader';
+import { MessageList } from '@/app/telecom/components/MessageList';
+import { MessageComposer } from '@/app/telecom/components/MessageComposer';
 
 const cardStyle = {
   background: 'rgba(255,255,255,0.035)',
   border: '1px solid rgba(255,255,255,0.07)',
   borderRadius: 12,
-} satisfies React.CSSProperties;
-
-const badgeStyle = {
-  minWidth: 18,
-  height: 18,
-  borderRadius: 999,
-  background: '#06b6d4',
-  color: '#001018',
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  fontSize: '0.65rem',
-  fontWeight: 900,
 } satisfies React.CSSProperties;
 
 export default function SmsPage() {
@@ -65,12 +44,16 @@ export default function SmsPage() {
   const [search, setSearch] = useState('');
   const [notificationStatus, setNotificationStatus] = useState('');
   const [sending, setSending] = useState(false);
+  const [messageLimit, setMessageLimit] = useState(40);
   const [isMobile, setIsMobile] = useState(false);
   const [showConversationMobile, setShowConversationMobile] = useState(false);
   const [showActivationModal, setShowActivationModal] = useState(false);
   const [activationBusy, setActivationBusy] = useState(false);
   const [activationError, setActivationError] = useState('');
+  const [isPeerTyping, setIsPeerTyping] = useState(false);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const typingTimeoutRef = useRef<number | null>(null);
   const incomingMessagesInitializedRef = useRef(false);
   const notifiedMessageIdsRef = useRef<Set<string>>(new Set());
 
@@ -179,8 +162,9 @@ export default function SmsPage() {
     let unsubscribe = () => {};
     void onForegroundPushMessage((payload) => {
       if (payload.type !== 'internal_message') return;
-      if (payload.messageId && notifiedMessageIdsRef.current.has(payload.messageId)) return;
-      if (payload.messageId) notifiedMessageIdsRef.current.add(payload.messageId);
+      const dedupeKey = buildMessageDedupeKey(payload.messageId, payload.senderId, payload.body);
+      if (notifiedMessageIdsRef.current.has(dedupeKey)) return;
+      notifiedMessageIdsRef.current.add(dedupeKey);
       if (payload.senderId) {
         setSelectedUserId(payload.senderId);
         if (isMobile) setShowConversationMobile(true);
@@ -200,15 +184,15 @@ export default function SmsPage() {
       user.uid,
       (items) => {
         if (!incomingMessagesInitializedRef.current) {
-          items.forEach((item) => notifiedMessageIdsRef.current.add(item.id));
+          items.forEach((item) => notifiedMessageIdsRef.current.add(buildMessageDedupeKey(item.id, item.senderId, item.body)));
           incomingMessagesInitializedRef.current = true;
           return;
         }
         const fresh = items
-          .filter((item) => !notifiedMessageIdsRef.current.has(item.id))
+          .filter((item) => !notifiedMessageIdsRef.current.has(buildMessageDedupeKey(item.id, item.senderId, item.body)))
           .sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0));
         fresh.forEach((message) => {
-          notifiedMessageIdsRef.current.add(message.id);
+          notifiedMessageIdsRef.current.add(buildMessageDedupeKey(message.id, message.senderId, message.body));
           const sender = contacts.find((contact) => contact.uid === message.senderId);
           const senderName = sender?.name || 'Contact Bizaflow';
           const preview = message.body.length > 90 ? `${message.body.slice(0, 87)}...` : message.body;
@@ -247,6 +231,7 @@ export default function SmsPage() {
       selectedConversationId,
       (items) => {
         setMessages(items);
+        void markConversationMessagesDelivered(selectedConversationId, user.uid).catch(() => undefined);
         void markMessageAsRead(selectedConversationId, user.uid).catch(() => undefined);
       },
       (error) => {
@@ -255,29 +240,25 @@ export default function SmsPage() {
           return;
         }
         showToast({ message: 'Lecture des messages impossible', variant: 'error' });
-      }
+      },
+      messageLimit
     );
     return () => unsub();
-  }, [selectedConversationId, showToast, user]);
+  }, [messageLimit, selectedConversationId, showToast, user]);
 
-  const filteredContacts = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return contacts;
-    return contacts.filter((contact) =>
-      [contact.name, contact.email, contact.telecomNumber, contact.role]
-        .join(' ')
-        .toLowerCase()
-        .includes(q)
-    );
-  }, [contacts, search]);
+  useEffect(() => {
+    if (!selectedContact || !selectedConversationId) {
+      setIsPeerTyping(false);
+      return;
+    }
+    return subscribeTypingState(selectedContact.uid, selectedConversationId, setIsPeerTyping);
+  }, [selectedContact, selectedConversationId]);
 
-  const unreadFor = useCallback(
-    (contactId: string) => {
-      const conversation = conversations.find((item) => item.id === (user ? conversationIdFor(user.uid, contactId) : ''));
-      return user ? conversation?.unreadCountByUser?.[user.uid] || 0 : 0;
-    },
-    [conversations, user]
-  );
+  useEffect(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+  }, [messages.length, selectedConversationId]);
 
   const sendMessage = useCallback(async () => {
     if (!user || !selectedContact || sending) return;
@@ -290,6 +271,7 @@ export default function SmsPage() {
       });
       void sendInternalMessagePush(messageId);
       setMessageBody('');
+      void setTypingState(user.uid, selectedConversationId, false);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Message impossible';
       if (error instanceof FirebaseError && error.code === 'permission-denied') {
@@ -300,7 +282,51 @@ export default function SmsPage() {
     } finally {
       setSending(false);
     }
-  }, [messageBody, selectedContact, sending, showToast, user]);
+  }, [messageBody, selectedContact, selectedConversationId, sending, showToast, user]);
+
+  const handleMessageChange = useCallback((value: string) => {
+    setMessageBody(value);
+    if (!user || !selectedConversationId) return;
+    void setTypingState(user.uid, selectedConversationId, true);
+    if (typingTimeoutRef.current) {
+      window.clearTimeout(typingTimeoutRef.current);
+    }
+    typingTimeoutRef.current = window.setTimeout(() => {
+      void setTypingState(user.uid, selectedConversationId, false);
+    }, 1400);
+  }, [selectedConversationId, user]);
+
+  useEffect(() => {
+    return () => {
+      if (typingTimeoutRef.current) window.clearTimeout(typingTimeoutRef.current);
+      if (user?.uid && selectedConversationId) {
+        void setTypingState(user.uid, selectedConversationId, false);
+      }
+    };
+  }, [selectedConversationId, user?.uid]);
+
+  const conversationRows = useMemo(() => {
+    return contacts
+      .map((contact) => {
+        const conversationId = user ? conversationIdFor(user.uid, contact.uid) : '';
+        const conversation = conversations.find((item) => item.id === conversationId);
+        return {
+          contact,
+          conversation,
+          unread: user ? conversation?.unreadCountByUser?.[user.uid] || 0 : 0,
+        };
+      })
+      .sort((a, b) => {
+        const aTs = a.conversation?.lastMessageAt?.seconds || 0;
+        const bTs = b.conversation?.lastMessageAt?.seconds || 0;
+        if (aTs !== bTs) return bTs - aTs;
+        return a.contact.name.localeCompare(b.contact.name);
+      });
+  }, [contacts, conversations, user]);
+
+  useEffect(() => {
+    setMessageLimit(40);
+  }, [selectedConversationId]);
 
   if (!user) return null;
 
@@ -352,51 +378,15 @@ export default function SmsPage() {
               placeholder="Nom, BZT, rôle..."
               style={{ marginBottom: 10 }}
             />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {filteredContacts.length === 0 ? (
-                <div style={{ color: '#64748b', textAlign: 'center', padding: 24, fontSize: '0.82rem' }}>
-                  Aucun utilisateur interne actif
-                </div>
-              ) : filteredContacts.map((contact) => {
-                const unread = unreadFor(contact.uid);
-                const active = contact.uid === selectedUserId;
-                return (
-                  <button
-                    key={contact.uid}
-                    onClick={() => {
-                      setSelectedUserId(contact.uid);
-                      if (isMobile) setShowConversationMobile(true);
-                    }}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 10,
-                      textAlign: 'left',
-                      padding: 10,
-                      borderRadius: 10,
-                      cursor: 'pointer',
-                      border: active ? '1px solid rgba(6,182,212,0.35)' : '1px solid rgba(255,255,255,0.06)',
-                      background: active ? 'rgba(6,182,212,0.09)' : 'rgba(255,255,255,0.025)',
-                      color: '#e2e8f0',
-                    }}
-                  >
-                    <div style={{ width: 38, height: 38, borderRadius: '50%', background: 'rgba(6,182,212,0.12)', color: '#06b6d4', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 900, flexShrink: 0 }}>
-                      {getInitials(contact.name)}
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <span style={{ fontWeight: 800, fontSize: '0.83rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{contact.name}</span>
-                        {unread > 0 && <span style={badgeStyle}>{unread}</span>}
-                      </div>
-                      <div style={{ color: '#06b6d4', fontSize: '0.68rem', fontFamily: 'monospace' }}>{contact.telecomNumber}</div>
-                      <div style={{ color: statusColors[contact.presenceStatus], fontSize: '0.67rem', marginTop: 2 }}>
-                        {statusLabels[contact.presenceStatus]} · {contact.role}
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
+            <ConversationList
+              rows={conversationRows}
+              search={search}
+              selectedUserId={selectedUserId}
+              onSelect={(userId) => {
+                setSelectedUserId(userId);
+                if (isMobile) setShowConversationMobile(true);
+              }}
+            />
           </section>
         )}
 
@@ -404,70 +394,31 @@ export default function SmsPage() {
           <section style={{ ...cardStyle, minHeight: 520, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             {selectedContact ? (
               <>
-                <div style={{ padding: 14, borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', gap: 10 }}>
-                  {isMobile && (
-                    <button onClick={() => setShowConversationMobile(false)} style={secondaryButtonStyle}>
-                      Retour
-                    </button>
-                  )}
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 900, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selectedContact.name}</div>
-                    <div style={{ color: '#64748b', fontSize: '0.74rem' }}>
-                      {selectedContact.telecomNumber} · {statusLabels[selectedContact.presenceStatus]}
-                    </div>
-                  </div>
-                </div>
-
-                <div style={{ flex: 1, padding: 14, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {messages.length === 0 ? (
-                    <div style={{ margin: 'auto', color: '#64748b', textAlign: 'center', fontSize: '0.82rem' }}>
-                      Aucun message. Démarrez la conversation.
-                    </div>
-                  ) : messages.map((message) => {
-                    const mine = message.senderId === user.uid;
-                    return (
-                      <div key={message.id} style={{ alignSelf: mine ? 'flex-end' : 'flex-start', maxWidth: '76%' }}>
-                        <div style={{
-                          padding: '9px 12px',
-                          borderRadius: mine ? '12px 12px 3px 12px' : '12px 12px 12px 3px',
-                          background: mine ? 'linear-gradient(135deg, #06b6d4, #14b8a6)' : 'rgba(255,255,255,0.06)',
-                          color: mine ? '#fff' : '#e2e8f0',
-                          fontSize: '0.86rem',
-                          lineHeight: 1.45,
-                        }}>
-                          {message.body}
-                        </div>
-                        <div style={{ color: '#64748b', fontSize: '0.62rem', marginTop: 3, textAlign: mine ? 'right' : 'left' }}>
-                          {formatTime(message.createdAt ? new Date(message.createdAt.seconds * 1000).toISOString() : null)} · {message.status}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div style={{ padding: 12, borderTop: '1px solid rgba(255,255,255,0.06)', display: 'flex', gap: 8, alignItems: 'center', position: 'sticky', bottom: 0, background: 'rgba(15,23,42,0.75)', backdropFilter: 'blur(6px)' }}>
-                  <input
-                    className="input-field"
-                    value={messageBody}
-                    onChange={(event) => setMessageBody(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' && !event.shiftKey) {
-                        event.preventDefault();
-                        void sendMessage();
-                      }
-                    }}
-                    placeholder="Écrire un SMS interne..."
-                    style={{ minWidth: 0 }}
-                  />
-                  <button
-                    onClick={sendMessage}
-                    disabled={!messageBody.trim() || sending}
-                    className="btn-primary"
-                    style={{ width: 112, flex: '0 0 112px', opacity: !messageBody.trim() || sending ? 0.55 : 1, whiteSpace: 'nowrap' }}
-                  >
-                    Envoyer
-                  </button>
-                </div>
+                <ChatHeader
+                  selectedContact={selectedContact}
+                  isMobile={isMobile}
+                  isPeerTyping={isPeerTyping}
+                  onBack={() => setShowConversationMobile(false)}
+                />
+                <MessageList
+                  messages={messages}
+                  currentUserId={user.uid}
+                  setContainerRef={(node) => {
+                    messagesContainerRef.current = node;
+                  }}
+                  onLoadOlder={() => setMessageLimit((current) => current + 40)}
+                />
+                <MessageComposer
+                  messageBody={messageBody}
+                  sending={sending}
+                  onChange={handleMessageChange}
+                  onSend={() => void sendMessage()}
+                  onBlur={() => {
+                    if (user?.uid && selectedConversationId) {
+                      void setTypingState(user.uid, selectedConversationId, false);
+                    }
+                  }}
+                />
               </>
             ) : (
               <div style={{ margin: 'auto', color: '#64748b', fontSize: '0.85rem' }}>Sélectionnez une conversation</div>
@@ -478,17 +429,6 @@ export default function SmsPage() {
     </div>
   );
 }
-
-const secondaryButtonStyle = {
-  padding: '9px 12px',
-  borderRadius: 10,
-  background: 'rgba(255,255,255,0.06)',
-  border: '1px solid rgba(255,255,255,0.12)',
-  color: '#e2e8f0',
-  cursor: 'pointer',
-  fontWeight: 800,
-  fontSize: '0.78rem',
-} satisfies React.CSSProperties;
 
 const activationModalBackdropStyle = {
   position: 'fixed',
@@ -537,4 +477,8 @@ async function sendInternalMessagePush(messageId: string): Promise<void> {
   } catch {
     // push notify is best-effort
   }
+}
+
+function buildMessageDedupeKey(messageId?: string, senderId?: string, body?: string): string {
+  return messageId || `${senderId || 'unknown'}::${(body || '').slice(0, 64)}`;
 }

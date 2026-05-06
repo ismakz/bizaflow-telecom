@@ -282,8 +282,8 @@ service cloud.firestore {
       allow update: if isCEO() || (
         isApproved()
         && resource.data.receiverId == request.auth.uid
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt"])
-        && request.resource.data.status == "read"
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "updatedAt", "deliveredAt", "readAt"])
+        && request.resource.data.status in ["delivered", "read"]
       );
 
       allow delete: if isCEO();

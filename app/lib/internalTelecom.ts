@@ -6,10 +6,13 @@ import {
   getDoc,
   getDocs,
   increment,
+  limit,
   onSnapshot,
+  orderBy,
   query,
   serverTimestamp,
   setDoc,
+  Timestamp as FirestoreTimestamp,
   updateDoc,
   where,
   type Unsubscribe,
@@ -51,6 +54,8 @@ export interface TelecomMessage {
   receiverId: string;
   body: string;
   status: MessageStatus;
+  deliveredAt?: Timestamp | null;
+  readAt?: Timestamp | null;
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
 }
@@ -220,9 +225,15 @@ export function subscribeUserConversations(
 export function subscribeConversationMessages(
   conversationId: string,
   callback: (messages: TelecomMessage[]) => void,
-  onError?: (error: Error) => void
+  onError?: (error: Error) => void,
+  messageLimit = 40
 ): Unsubscribe {
-  const messagesQuery = query(collection(db, 'telecom_messages'), where('conversationId', '==', conversationId));
+  const messagesQuery = query(
+    collection(db, 'telecom_messages'),
+    where('conversationId', '==', conversationId),
+    orderBy('createdAt', 'desc'),
+    limit(messageLimit)
+  );
   return onSnapshot(
     messagesQuery,
     (snap) => {
@@ -362,11 +373,22 @@ export async function sendInternalMessage(input: {
 
 export async function markMessageAsRead(conversationId: string, userId: string): Promise<void> {
   if (!conversationId || !userId) return;
-  const snap = await getDocs(query(collection(db, 'telecom_messages'), where('conversationId', '==', conversationId)));
+  const snap = await getDocs(
+    query(
+      collection(db, 'telecom_messages'),
+      where('conversationId', '==', conversationId),
+      where('receiverId', '==', userId),
+      where('status', 'in', ['sent', 'delivered'])
+    )
+  );
   await Promise.all(
     snap.docs
       .filter((messageDoc) => messageDoc.data().receiverId === userId && messageDoc.data().status !== 'read')
-      .map((messageDoc) => updateDoc(doc(db, 'telecom_messages', messageDoc.id), { status: 'read', updatedAt: serverTimestamp() }))
+      .map((messageDoc) => updateDoc(doc(db, 'telecom_messages', messageDoc.id), {
+        status: 'read',
+        readAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      }))
   );
   await setDoc(
     doc(db, 'telecom_conversations', conversationId),
@@ -376,6 +398,67 @@ export async function markMessageAsRead(conversationId: string, userId: string):
     },
     { merge: true }
   );
+}
+
+export async function markConversationMessagesDelivered(conversationId: string, userId: string): Promise<void> {
+  if (!conversationId || !userId) return;
+  const snap = await getDocs(
+    query(
+      collection(db, 'telecom_messages'),
+      where('conversationId', '==', conversationId),
+      where('receiverId', '==', userId),
+      where('status', '==', 'sent')
+    )
+  );
+  await Promise.all(
+    snap.docs
+      .filter((messageDoc) => messageDoc.data().receiverId === userId && messageDoc.data().status === 'sent')
+      .map((messageDoc) => updateDoc(doc(db, 'telecom_messages', messageDoc.id), {
+        status: 'delivered',
+        deliveredAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      }))
+  );
+}
+
+export async function setTypingState(
+  userId: string,
+  conversationId: string,
+  isTyping: boolean
+): Promise<void> {
+  if (!userId) return;
+  await setDoc(
+    doc(db, 'telecom_presence', userId),
+    {
+      userId,
+      typingInConversationId: isTyping ? conversationId : null,
+      typingUpdatedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+export function subscribeTypingState(
+  peerUserId: string,
+  conversationId: string,
+  callback: (isTyping: boolean) => void
+): Unsubscribe {
+  return onSnapshot(doc(db, 'telecom_presence', peerUserId), (snap) => {
+    if (!snap.exists()) {
+      callback(false);
+      return;
+    }
+    const data = snap.data() as {
+      typingInConversationId?: string | null;
+      typingUpdatedAt?: FirestoreTimestamp | null;
+    };
+    const sameConversation = data.typingInConversationId === conversationId;
+    const recentTyping = data.typingUpdatedAt
+      ? Date.now() - data.typingUpdatedAt.toMillis() < 9000
+      : false;
+    callback(Boolean(sameConversation && recentTyping));
+  });
 }
 
 export function subscribeIncomingInternalCalls(
