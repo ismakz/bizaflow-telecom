@@ -49,10 +49,25 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/telecom_conversations/$(conversationId)).data;
     }
 
+    function conversationExists(conversationId) {
+      return exists(/databases/$(database)/documents/telecom_conversations/$(conversationId));
+    }
+
+    function uidInParticipants(listValue) {
+      return listValue is list && request.auth.uid in listValue;
+    }
+
     function messageConversationMatches(data) {
-      return conversationIdMatches(data.conversationId, conversationDoc(data.conversationId).participantIds) &&
+      return (
+        conversationDoc(data.conversationId).participantIds is list &&
+        conversationIdMatches(data.conversationId, conversationDoc(data.conversationId).participantIds) &&
         data.senderId in conversationDoc(data.conversationId).participantIds &&
-        data.receiverId in conversationDoc(data.conversationId).participantIds;
+        data.receiverId in conversationDoc(data.conversationId).participantIds
+      ) || (
+        conversationDoc(data.conversationId).participants is list &&
+        data.senderId in conversationDoc(data.conversationId).participants &&
+        data.receiverId in conversationDoc(data.conversationId).participants
+      );
     }
 
     function isSafeSelfUserUpdate(uid) {
@@ -241,7 +256,12 @@ service cloud.firestore {
     // INTERNAL CONVERSATIONS
     // =========================
     match /telecom_conversations/{conversationId} {
-      allow read: if isParticipant(resource.data.participantIds) || isCEO();
+      allow read: if isCEO() || (
+        isApproved() && (
+          uidInParticipants(resource.data.participantIds) ||
+          uidInParticipants(resource.data.participants)
+        )
+      );
 
       allow create: if isApproved()
         && conversationIdMatches(conversationId, request.resource.data.participantIds)
@@ -265,7 +285,20 @@ service cloud.firestore {
         (
           resource.data.senderId == request.auth.uid ||
           resource.data.receiverId == request.auth.uid ||
-          request.auth.uid in conversationDoc(resource.data.conversationId).participantIds
+          resource.data.callerUserId == request.auth.uid ||
+          resource.data.targetUserId == request.auth.uid ||
+          resource.data.from == myTelecomNumber() ||
+          resource.data.to == myTelecomNumber() ||
+          uidInParticipants(resource.data.participantIds) ||
+          uidInParticipants(resource.data.participants) ||
+          (
+            resource.data.conversationId is string &&
+            conversationExists(resource.data.conversationId) &&
+            (
+              uidInParticipants(conversationDoc(resource.data.conversationId).participantIds) ||
+              uidInParticipants(conversationDoc(resource.data.conversationId).participants)
+            )
+          )
         )
       );
 

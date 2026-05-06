@@ -211,11 +211,29 @@ export default function SmsPage() {
 
   useEffect(() => {
     if (!user) return;
-    const unsubUsers = subscribeInternalUsers(user.uid, (items) => {
-      setContacts(items);
-      setSelectedUserId((current) => current || items[0]?.uid || '');
-    });
-    const unsubConversations = subscribeUserConversations(user.uid, setConversations);
+    const unsubUsers = subscribeInternalUsers(
+      user.uid,
+      (items) => {
+        setContacts(items);
+        setSelectedUserId((current) => current || items[0]?.uid || '');
+      }
+    );
+    const unsubConversations = subscribeUserConversations(
+      user.uid,
+      setConversations,
+      (error) => {
+        console.error('[SMS LISTENER ERROR]', {
+          collection: 'telecom_conversations',
+          query: [
+            { participantIdsArrayContains: user.uid },
+            { participantsArrayContains: user.uid },
+          ],
+          uid: user.uid,
+          telecomNumber: user.telecomNumber,
+          error,
+        });
+      }
+    );
     return () => {
       unsubUsers();
       unsubConversations();
@@ -235,6 +253,13 @@ export default function SmsPage() {
         void markMessageAsRead(selectedConversationId, user.uid).catch(() => undefined);
       },
       (error) => {
+        console.error('[SMS LISTENER ERROR]', {
+          collection: 'telecom_messages',
+          query: { conversationId: selectedConversationId },
+          uid: user.uid,
+          telecomNumber: user.telecomNumber,
+          error,
+        });
         if (error instanceof FirebaseError && error.code === 'permission-denied') {
           setNotificationStatus('Accès conversation refusé. Vérifiez les permissions de ce chat.');
           return;
