@@ -169,14 +169,21 @@ export function subscribeDirectConversationMessages(input: {
     );
   }
 
-  if (input.conversationId && input.peerUid) {
+  if (input.conversationId) {
     addQuery(
       idx++,
-      { where: [{ conversationId: input.conversationId }, { senderId_in: [input.currentUserUid, input.peerUid] }], orderBy: 'createdAt desc', limit: limitCount },
+      {
+        where: [
+          { conversationId: input.conversationId },
+          { participantIdsArrayContains: input.currentUserUid },
+        ],
+        orderBy: 'createdAt desc',
+        limit: limitCount,
+      },
       query(
         collection(db, 'telecom_messages'),
         where('conversationId', '==', input.conversationId),
-        where('senderId', 'in', [input.currentUserUid, input.peerUid]),
+        where('participantIds', 'array-contains', input.currentUserUid),
         orderBy('createdAt', 'desc'),
         limit(limitCount)
       )
