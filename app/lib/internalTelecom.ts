@@ -23,6 +23,7 @@ import type { UserRole, UserStatus } from '@/app/lib/types';
 
 export type PresenceStatus = 'online' | 'offline' | 'busy' | 'in_call';
 export type MessageStatus = 'sent' | 'delivered' | 'read';
+export type TelecomMessageType = 'text' | 'image' | 'document' | 'audio';
 export type InternalCallStatus = 'ringing' | 'accepted' | 'declined' | 'missed' | 'completed' | 'failed';
 export type IceCandidateRole = 'caller' | 'receiver';
 
@@ -52,12 +53,134 @@ export interface TelecomMessage {
   conversationId: string;
   senderId: string;
   receiverId: string;
+  senderUserId?: string;
+  targetUserId?: string;
+  from?: string;
+  to?: string;
   body: string;
+  type?: TelecomMessageType;
+  mediaUrl?: string | null;
+  mediaName?: string | null;
+  mediaMimeType?: string | null;
+  mediaSize?: number | null;
+  replyToMessageId?: string | null;
+  reactionsByUser?: Record<string, string>;
   status: MessageStatus;
   deliveredAt?: Timestamp | null;
   readAt?: Timestamp | null;
+  editedAt?: Timestamp | null;
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
+}
+
+export function subscribeDirectConversationMessages(input: {
+  currentUserUid: string;
+  currentUserTelecomNumber?: string;
+  peerUid?: string;
+  peerTelecomNumber?: string;
+  conversationId?: string;
+  limitCount?: number;
+  callback: (messages: TelecomMessage[]) => void;
+  onError?: (error: Error, queryMeta: Record<string, unknown>) => void;
+}): Unsubscribe {
+  const limitCount = input.limitCount || 40;
+  const unsubs: Unsubscribe[] = [];
+  const buckets: TelecomMessage[][] = [];
+
+  const emit = () => {
+    const merged = new Map<string, TelecomMessage>();
+    buckets.flat().forEach((m) => merged.set(m.id, m));
+    input.callback(
+      [...merged.values()].sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0))
+    );
+  };
+
+  const addQuery = (idx: number, queryMeta: Record<string, unknown>, q: ReturnType<typeof query>) => {
+    buckets[idx] = [];
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        buckets[idx] = snap.docs.map((docSnap) => {
+          const data = docSnap.data() as Record<string, unknown>;
+          return { id: docSnap.id, ...data } as TelecomMessage;
+        });
+        emit();
+      },
+      (error) => {
+        input.onError?.(error, queryMeta);
+      }
+    );
+    unsubs.push(unsub);
+  };
+
+  let idx = 0;
+  if (input.peerUid) {
+    addQuery(
+      idx++,
+      { where: [{ senderId: input.currentUserUid }, { receiverId: input.peerUid }], orderBy: 'createdAt desc', limit: limitCount },
+      query(
+        collection(db, 'telecom_messages'),
+        where('senderId', '==', input.currentUserUid),
+        where('receiverId', '==', input.peerUid),
+        orderBy('createdAt', 'desc'),
+        limit(limitCount)
+      )
+    );
+    addQuery(
+      idx++,
+      { where: [{ senderId: input.peerUid }, { receiverId: input.currentUserUid }], orderBy: 'createdAt desc', limit: limitCount },
+      query(
+        collection(db, 'telecom_messages'),
+        where('senderId', '==', input.peerUid),
+        where('receiverId', '==', input.currentUserUid),
+        orderBy('createdAt', 'desc'),
+        limit(limitCount)
+      )
+    );
+  }
+
+  if (input.currentUserTelecomNumber && input.peerTelecomNumber) {
+    addQuery(
+      idx++,
+      { where: [{ from: input.currentUserTelecomNumber }, { to: input.peerTelecomNumber }], orderBy: 'createdAt desc', limit: limitCount },
+      query(
+        collection(db, 'telecom_messages'),
+        where('from', '==', input.currentUserTelecomNumber),
+        where('to', '==', input.peerTelecomNumber),
+        orderBy('createdAt', 'desc'),
+        limit(limitCount)
+      )
+    );
+    addQuery(
+      idx++,
+      { where: [{ from: input.peerTelecomNumber }, { to: input.currentUserTelecomNumber }], orderBy: 'createdAt desc', limit: limitCount },
+      query(
+        collection(db, 'telecom_messages'),
+        where('from', '==', input.peerTelecomNumber),
+        where('to', '==', input.currentUserTelecomNumber),
+        orderBy('createdAt', 'desc'),
+        limit(limitCount)
+      )
+    );
+  }
+
+  if (input.conversationId && input.peerUid) {
+    addQuery(
+      idx++,
+      { where: [{ conversationId: input.conversationId }, { senderId_in: [input.currentUserUid, input.peerUid] }], orderBy: 'createdAt desc', limit: limitCount },
+      query(
+        collection(db, 'telecom_messages'),
+        where('conversationId', '==', input.conversationId),
+        where('senderId', 'in', [input.currentUserUid, input.peerUid]),
+        orderBy('createdAt', 'desc'),
+        limit(limitCount)
+      )
+    );
+  }
+
+  return () => {
+    unsubs.forEach((unsub) => unsub());
+  };
 }
 
 export interface TelecomInternalCall {
@@ -364,6 +487,12 @@ export async function sendInternalMessage(input: {
   senderId: string;
   receiverId: string;
   body: string;
+  type?: TelecomMessageType;
+  mediaUrl?: string | null;
+  mediaName?: string | null;
+  mediaMimeType?: string | null;
+  mediaSize?: number | null;
+  replyToMessageId?: string | null;
 }): Promise<string> {
   const settings = await getInternalSettings();
   if (!settings.internalMessagesEnabled) throw new Error('MESSAGES_INTERNAL_DISABLED');
@@ -371,7 +500,9 @@ export async function sendInternalMessage(input: {
   if (input.senderId === input.receiverId) throw new Error('MESSAGE_SELF_NOT_ALLOWED');
 
   const body = input.body.trim();
-  if (!body) throw new Error('MESSAGE_BODY_REQUIRED');
+  const isText = (input.type || 'text') === 'text';
+  if (isText && !body) throw new Error('MESSAGE_BODY_REQUIRED');
+  if (!isText && !input.mediaUrl) throw new Error('MESSAGE_MEDIA_REQUIRED');
   if (body.length > 2000) throw new Error('MESSAGE_BODY_TOO_LONG');
 
   const conversationId = conversationIdFor(input.senderId, input.receiverId);
@@ -382,7 +513,7 @@ export async function sendInternalMessage(input: {
     conversationRef,
     {
       participantIds: [input.senderId, input.receiverId].sort(),
-      lastMessage: body,
+      lastMessage: body || `[${input.type || 'text'}]`,
       lastMessageAt: now,
       [`unreadCountByUser.${input.senderId}`]: 0,
       [`unreadCountByUser.${input.receiverId}`]: increment(1),
@@ -397,12 +528,60 @@ export async function sendInternalMessage(input: {
     senderId: input.senderId,
     receiverId: input.receiverId,
     body,
+    type: input.type || 'text',
+    mediaUrl: input.mediaUrl || null,
+    mediaName: input.mediaName || null,
+    mediaMimeType: input.mediaMimeType || null,
+    mediaSize: input.mediaSize || null,
+    replyToMessageId: input.replyToMessageId || null,
+    reactionsByUser: {},
     status: 'sent',
     createdAt: now,
     updatedAt: now,
   });
 
   return messageRef.id;
+}
+
+export async function setMessageReaction(input: {
+  messageId: string;
+  userId: string;
+  emoji: string | null;
+}): Promise<void> {
+  const messageRef = doc(db, 'telecom_messages', input.messageId);
+  const snap = await getDoc(messageRef);
+  if (!snap.exists()) throw new Error('MESSAGE_NOT_FOUND');
+  const data = snap.data() as TelecomMessage;
+  const reactions = { ...(data.reactionsByUser || {}) };
+  if (!input.emoji) {
+    delete reactions[input.userId];
+  } else {
+    reactions[input.userId] = input.emoji;
+  }
+  await updateDoc(messageRef, {
+    reactionsByUser: reactions,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function editOwnMessage(input: {
+  messageId: string;
+  userId: string;
+  body: string;
+}): Promise<void> {
+  const messageRef = doc(db, 'telecom_messages', input.messageId);
+  const snap = await getDoc(messageRef);
+  if (!snap.exists()) throw new Error('MESSAGE_NOT_FOUND');
+  const data = snap.data() as TelecomMessage;
+  if (data.senderId !== input.userId) throw new Error('FORBIDDEN');
+  const body = input.body.trim();
+  if (!body) throw new Error('MESSAGE_BODY_REQUIRED');
+  if (body.length > 2000) throw new Error('MESSAGE_BODY_TOO_LONG');
+  await updateDoc(messageRef, {
+    body,
+    editedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
 }
 
 export async function markMessageAsRead(conversationId: string, userId: string): Promise<void> {

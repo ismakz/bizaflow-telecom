@@ -9,8 +9,9 @@ import {
   markConversationMessagesDelivered,
   markMessageAsRead,
   sendInternalMessage,
+  setMessageReaction,
   setTypingState,
-  subscribeConversationMessages,
+  subscribeDirectConversationMessages,
   subscribeIncomingMessages,
   subscribeInternalUsers,
   subscribeTypingState,
@@ -22,6 +23,7 @@ import {
 } from '@/app/lib/internalTelecom';
 import { auth } from '@/app/lib/firebase';
 import { onForegroundPushMessage, registerPushToken } from '@/app/lib/pushNotifications';
+import { detectMediaType, MAX_MEDIA_BYTES, uploadMedia } from '@/app/lib/telecomMedia';
 import { ConversationList } from '@/app/telecom/components/ConversationList';
 import { ChatHeader } from '@/app/telecom/components/ChatHeader';
 import { MessageList } from '@/app/telecom/components/MessageList';
@@ -51,11 +53,19 @@ export default function SmsPage() {
   const [activationBusy, setActivationBusy] = useState(false);
   const [activationError, setActivationError] = useState('');
   const [isPeerTyping, setIsPeerTyping] = useState(false);
+  const [replyToMessageId, setReplyToMessageId] = useState<string | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
   const audioContextRef = useRef<AudioContext | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingChunksRef = useRef<Blob[]>([]);
+  const recordingTimerRef = useRef<number | null>(null);
   const typingTimeoutRef = useRef<number | null>(null);
   const incomingMessagesInitializedRef = useRef(false);
   const notifiedMessageIdsRef = useRef<Set<string>>(new Set());
+  const conversationErrorToastShownRef = useRef(false);
 
   const selectedContact = useMemo(
     () => contacts.find((contact) => contact.uid === selectedUserId) || null,
@@ -81,6 +91,19 @@ export default function SmsPage() {
       if (isMobile) setShowConversationMobile(true);
     }
   }, [isMobile, searchParams]);
+
+  useEffect(() => {
+    if (!contacts.length || !selectedUserId) return;
+    const normalized = selectedUserId.trim().toLowerCase();
+    const found = contacts.find((contact) =>
+      [contact.uid, String((contact as { id?: string }).id || ''), String((contact as { userId?: string }).userId || ''), contact.telecomNumber]
+        .map((value) => value.toLowerCase())
+        .includes(normalized)
+    );
+    if (found && found.uid !== selectedUserId) {
+      setSelectedUserId(found.uid);
+    }
+  }, [contacts, selectedUserId]);
 
   useEffect(() => {
     if (!user) return;
@@ -245,31 +268,40 @@ export default function SmsPage() {
       setMessages([]);
       return;
     }
-    const unsub = subscribeConversationMessages(
-      selectedConversationId,
-      (items) => {
+    conversationErrorToastShownRef.current = false;
+    const unsub = subscribeDirectConversationMessages({
+      currentUserUid: user.uid,
+      currentUserTelecomNumber: user.telecomNumber,
+      peerUid: selectedContact?.uid,
+      peerTelecomNumber: selectedContact?.telecomNumber,
+      conversationId: selectedConversationId,
+      limitCount: messageLimit,
+      callback: (items) => {
         setMessages(items);
         void markConversationMessagesDelivered(selectedConversationId, user.uid).catch(() => undefined);
         void markMessageAsRead(selectedConversationId, user.uid).catch(() => undefined);
       },
-      (error) => {
+      onError: (error, queryMeta) => {
         console.error('[SMS LISTENER ERROR]', {
           collection: 'telecom_messages',
-          query: { conversationId: selectedConversationId },
+          whereOrderBy: queryMeta,
+          conversationId: selectedConversationId,
           uid: user.uid,
           telecomNumber: user.telecomNumber,
+          selectedContactUid: selectedContact?.uid || null,
+          selectedContactTelecomNumber: selectedContact?.telecomNumber || null,
+          errorCode: error instanceof FirebaseError ? error.code : 'unknown',
+          errorMessage: error instanceof Error ? error.message : String(error),
           error,
         });
-        if (error instanceof FirebaseError && error.code === 'permission-denied') {
+        if (!conversationErrorToastShownRef.current) {
+          conversationErrorToastShownRef.current = true;
           setNotificationStatus('Accès conversation refusé. Vérifiez les permissions de ce chat.');
-          return;
         }
-        showToast({ message: 'Lecture des messages impossible', variant: 'error' });
       },
-      messageLimit
-    );
+    });
     return () => unsub();
-  }, [messageLimit, selectedConversationId, showToast, user]);
+  }, [messageLimit, selectedContact?.telecomNumber, selectedContact?.uid, selectedConversationId, user]);
 
   useEffect(() => {
     if (!selectedContact || !selectedConversationId) {
@@ -293,9 +325,12 @@ export default function SmsPage() {
         senderId: user.uid,
         receiverId: selectedContact.uid,
         body: messageBody,
+        type: 'text',
+        replyToMessageId,
       });
       void sendInternalMessagePush(messageId);
       setMessageBody('');
+      setReplyToMessageId(null);
       void setTypingState(user.uid, selectedConversationId, false);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Message impossible';
@@ -307,7 +342,109 @@ export default function SmsPage() {
     } finally {
       setSending(false);
     }
-  }, [messageBody, selectedContact, selectedConversationId, sending, showToast, user]);
+  }, [messageBody, replyToMessageId, selectedContact, selectedConversationId, sending, showToast, user]);
+
+  const handleSendMedia = useCallback(async (file: File) => {
+    if (!user || !selectedContact || !selectedConversationId) return;
+    if (file.size > MAX_MEDIA_BYTES) {
+      showToast({ message: 'Fichier trop lourd (max 20MB).', variant: 'error' });
+      return;
+    }
+    const mediaType = detectMediaType(file);
+    if (!mediaType) {
+      showToast({ message: 'Type fichier non supporté (image/PDF/DOC/audio).', variant: 'error' });
+      return;
+    }
+    setSending(true);
+    try {
+      const uploaded = await uploadMedia({
+        file,
+        uploaderUid: user.uid,
+        conversationId: selectedConversationId,
+        mediaType,
+        fileName: file.name,
+      });
+      const messageId = await sendInternalMessage({
+        senderId: user.uid,
+        receiverId: selectedContact.uid,
+        body: mediaType === 'image' ? 'Image' : mediaType === 'audio' ? 'Message vocal' : `Document: ${uploaded.name}`,
+        type: mediaType,
+        mediaUrl: uploaded.url,
+        mediaName: uploaded.name,
+        mediaMimeType: uploaded.mimeType,
+        mediaSize: uploaded.size,
+        replyToMessageId,
+      });
+      void sendInternalMessagePush(messageId);
+      setReplyToMessageId(null);
+    } catch (error) {
+      showToast({ message: explainError(error instanceof Error ? error.message : 'Upload impossible'), variant: 'error' });
+    } finally {
+      setSending(false);
+    }
+  }, [replyToMessageId, selectedContact, selectedConversationId, showToast, user]);
+
+  const handleToggleRecording = useCallback(async () => {
+    if (!user || !selectedContact) return;
+    if (isRecording) {
+      mediaRecorderRef.current?.stop();
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      showToast({ message: 'Enregistrement vocal non supporté.', variant: 'error' });
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      recordingChunksRef.current = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) recordingChunksRef.current.push(event.data);
+      };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((track) => track.stop());
+        setIsRecording(false);
+        if (recordingTimerRef.current) window.clearInterval(recordingTimerRef.current);
+        setRecordingSeconds(0);
+        const blob = new Blob(recordingChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        if (blob.size === 0) return;
+        const file = new File([blob], `voice-${Date.now()}.webm`, { type: blob.type || 'audio/webm' });
+        await handleSendMedia(file);
+      };
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setIsRecording(true);
+      recordingTimerRef.current = window.setInterval(() => {
+        setRecordingSeconds((s) => s + 1);
+      }, 1000);
+    } catch {
+      showToast({ message: 'Impossible de démarrer le micro.', variant: 'error' });
+    }
+  }, [handleSendMedia, isRecording, selectedContact, showToast, user]);
+
+  const handleSetReaction = useCallback(async (messageId: string, emoji: string) => {
+    if (!user) return;
+    try {
+      await setMessageReaction({ messageId, userId: user.uid, emoji });
+    } catch (error) {
+      showToast({ message: explainError(error instanceof Error ? error.message : 'Réaction impossible'), variant: 'error' });
+    }
+  }, [showToast, user]);
+
+  const handleRemoveReaction = useCallback(async (messageId: string) => {
+    if (!user) return;
+    try {
+      await setMessageReaction({ messageId, userId: user.uid, emoji: null });
+    } catch (error) {
+      showToast({ message: explainError(error instanceof Error ? error.message : 'Suppression réaction impossible'), variant: 'error' });
+    }
+  }, [showToast, user]);
+
+  const handleJumpToMessage = useCallback((messageId: string) => {
+    const el = document.getElementById(`msg-${messageId}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, []);
 
   const handleMessageChange = useCallback((value: string) => {
     setMessageBody(value);
@@ -327,6 +464,7 @@ export default function SmsPage() {
       if (user?.uid && selectedConversationId) {
         void setTypingState(user.uid, selectedConversationId, false);
       }
+      if (recordingTimerRef.current) window.clearInterval(recordingTimerRef.current);
     };
   }, [selectedConversationId, user?.uid]);
 
@@ -348,6 +486,10 @@ export default function SmsPage() {
         return a.contact.name.localeCompare(b.contact.name);
       });
   }, [contacts, conversations, user]);
+  const replyPreview = useMemo(() => {
+    if (!replyToMessageId) return '';
+    return messages.find((m) => m.id === replyToMessageId)?.body || '';
+  }, [messages, replyToMessageId]);
 
   useEffect(() => {
     setMessageLimit(40);
@@ -432,6 +574,10 @@ export default function SmsPage() {
                     messagesContainerRef.current = node;
                   }}
                   onLoadOlder={() => setMessageLimit((current) => current + 40)}
+                  onReply={(messageId) => setReplyToMessageId(messageId)}
+                  onReact={handleSetReaction}
+                  onRemoveReaction={handleRemoveReaction}
+                  onJumpToMessage={handleJumpToMessage}
                 />
                 <MessageComposer
                   messageBody={messageBody}
@@ -442,6 +588,24 @@ export default function SmsPage() {
                     if (user?.uid && selectedConversationId) {
                       void setTypingState(user.uid, selectedConversationId, false);
                     }
+                  }}
+                  onPickFile={() => fileInputRef.current?.click()}
+                  onToggleRecord={() => void handleToggleRecording()}
+                  isRecording={isRecording}
+                  recordingSeconds={recordingSeconds}
+                  replyPreview={replyPreview}
+                  onClearReply={() => setReplyToMessageId(null)}
+                />
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*,.pdf,.doc,.docx,audio/*"
+                  style={{ display: 'none' }}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (!file) return;
+                    void handleSendMedia(file);
+                    event.target.value = '';
                   }}
                 />
               </>
@@ -484,6 +648,8 @@ function explainError(message: string): string {
   if (message.includes('FORBIDDEN')) return 'Action non autorisée';
   if (message.includes('BODY_REQUIRED')) return 'Message vide';
   if (message.includes('BODY_TOO_LONG')) return 'Message trop long';
+  if (message.includes('MEDIA_TOO_LARGE')) return 'Fichier trop lourd';
+  if (message.includes('MESSAGE_MEDIA_REQUIRED')) return 'Fichier requis';
   return 'Action interne impossible';
 }
 

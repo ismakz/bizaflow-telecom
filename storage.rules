@@ -1,0 +1,20 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function mediaPathValid(conversationId, userId, fileName) {
+      return conversationId.size() > 0 && userId == request.auth.uid && fileName.size() > 0;
+    }
+
+    match /telecom_media/{conversationId}/{userId}/{fileName} {
+      allow read: if isAuth();
+      allow write: if isAuth()
+        && mediaPathValid(conversationId, userId, fileName)
+        && request.resource.size < 20 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*|audio/.*|application/pdf|application/msword|application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    }
+  }
+}
