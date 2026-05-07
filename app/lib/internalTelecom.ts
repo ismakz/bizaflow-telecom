@@ -607,7 +607,7 @@ export async function createInternalGroup(input: {
   const members = Array.from(new Set([...input.memberIds, input.createdBy])).filter(Boolean);
   if (members.length < 2) throw new Error('GROUP_MEMBERS_REQUIRED');
   const now = serverTimestamp();
-  const groupRef = await addDoc(collection(db, 'telecom_groups'), {
+  const groupPayload = {
     name,
     photoUrl: input.photoUrl || null,
     memberIds: members,
@@ -615,9 +615,30 @@ export async function createInternalGroup(input: {
     createdBy: input.createdBy,
     createdAt: now,
     updatedAt: now,
+  };
+  console.log('[CREATE GROUP STEP]', {
+    step: 'create_telecom_group',
+    collection: 'telecom_groups',
+    payload: { ...groupPayload, createdAt: 'serverTimestamp()', updatedAt: 'serverTimestamp()' },
+    currentUserId: input.createdBy,
+    selectedMemberIds: input.memberIds,
   });
+  let groupRef: Awaited<ReturnType<typeof addDoc>>;
+  try {
+    groupRef = await addDoc(collection(db, 'telecom_groups'), groupPayload);
+  } catch (error) {
+    console.log('[CREATE GROUP STEP]', {
+      step: 'create_telecom_group_failed',
+      collection: 'telecom_groups',
+      payload: { ...groupPayload, createdAt: 'serverTimestamp()', updatedAt: 'serverTimestamp()' },
+      currentUserId: input.createdBy,
+      selectedMemberIds: input.memberIds,
+      error,
+    });
+    throw new Error('CREATE_GROUP_STEP_TELECOM_GROUPS_FAILED');
+  }
   const conversationId = groupRef.id;
-  await setDoc(doc(db, 'telecom_conversations', conversationId), {
+  const conversationPayload = {
     type: 'group',
     groupId: groupRef.id,
     participantIds: members,
@@ -632,8 +653,29 @@ export async function createInternalGroup(input: {
     }, {} as Record<string, number>),
     createdAt: now,
     updatedAt: now,
-  }, { merge: true });
-  await addDoc(collection(db, 'telecom_messages'), {
+  };
+  console.log('[CREATE GROUP STEP]', {
+    step: 'create_group_conversation',
+    collection: 'telecom_conversations',
+    payload: { ...conversationPayload, createdAt: 'serverTimestamp()', updatedAt: 'serverTimestamp()' },
+    currentUserId: input.createdBy,
+    selectedMemberIds: input.memberIds,
+  });
+  try {
+    await setDoc(doc(db, 'telecom_conversations', conversationId), conversationPayload, { merge: true });
+  } catch (error) {
+    console.log('[CREATE GROUP STEP]', {
+      step: 'create_group_conversation_failed',
+      collection: 'telecom_conversations',
+      payload: { ...conversationPayload, createdAt: 'serverTimestamp()', updatedAt: 'serverTimestamp()' },
+      currentUserId: input.createdBy,
+      selectedMemberIds: input.memberIds,
+      error,
+    });
+    await deleteDoc(doc(db, 'telecom_groups', groupRef.id));
+    throw new Error('CREATE_GROUP_STEP_CONVERSATIONS_FAILED');
+  }
+  const systemMessagePayload = {
     conversationId,
     groupId: groupRef.id,
     senderId: input.createdBy,
@@ -648,7 +690,29 @@ export async function createInternalGroup(input: {
     statusByUser: { [input.createdBy]: 'read' },
     createdAt: now,
     updatedAt: now,
+  };
+  console.log('[CREATE GROUP STEP]', {
+    step: 'create_group_system_message',
+    collection: 'telecom_messages',
+    payload: { ...systemMessagePayload, createdAt: 'serverTimestamp()', updatedAt: 'serverTimestamp()' },
+    currentUserId: input.createdBy,
+    selectedMemberIds: input.memberIds,
   });
+  try {
+    await addDoc(collection(db, 'telecom_messages'), systemMessagePayload);
+  } catch (error) {
+    console.log('[CREATE GROUP STEP]', {
+      step: 'create_group_system_message_failed',
+      collection: 'telecom_messages',
+      payload: { ...systemMessagePayload, createdAt: 'serverTimestamp()', updatedAt: 'serverTimestamp()' },
+      currentUserId: input.createdBy,
+      selectedMemberIds: input.memberIds,
+      error,
+    });
+    await deleteDoc(doc(db, 'telecom_conversations', conversationId));
+    await deleteDoc(doc(db, 'telecom_groups', groupRef.id));
+    throw new Error('CREATE_GROUP_STEP_MESSAGES_FAILED');
+  }
   return { groupId: groupRef.id, conversationId };
 }
 
