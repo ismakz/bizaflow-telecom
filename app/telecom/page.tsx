@@ -1020,6 +1020,9 @@ const activationModalStyle = {
 } satisfies React.CSSProperties;
 
 function explainError(message: string): string {
+  if (message.includes('CREATE_GROUP_STEP_TELECOM_GROUPS_FAILED')) return 'Création groupe refusée (telecom_groups).';
+  if (message.includes('CREATE_GROUP_STEP_CONVERSATIONS_FAILED')) return 'Création conversation groupe refusée.';
+  if (message.includes('CREATE_GROUP_STEP_MESSAGES_FAILED')) return 'Création message système groupe refusée.';
   if (message.includes('OFFLINE')) return 'Utilisateur hors ligne';
   if (message.includes('DISABLED')) return 'Fonction interne désactivée';
   if (message.includes('SELF')) return 'Action impossible sur votre propre compte';
