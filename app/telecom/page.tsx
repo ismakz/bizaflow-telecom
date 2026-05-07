@@ -3,27 +3,40 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { FirebaseError } from 'firebase/app';
-import { Timestamp } from 'firebase/firestore';
+import { Timestamp, collection, onSnapshot, query, where } from 'firebase/firestore';
 import { useApp } from '@/app/components/AppProvider';
 import {
   backfillMessageParticipantMeta,
+  createInternalGroup,
+  createTextStatus,
+  deleteGroup,
+  deleteOwnStatus,
+  leaveGroup,
   conversationIdFor,
   enrichConversationParticipantsMeta,
   markConversationMessagesDelivered,
   markMessageAsRead,
+  markStatusViewed,
+  renameGroup,
   sendInternalMessage,
+  sendGroupMessage,
   setTypingState,
+  subscribeConversationMessages,
   subscribeDirectConversationMessages,
   subscribeIncomingMessages,
   subscribeInternalUsers,
+  subscribeRecentStatuses,
   subscribeTypingState,
   subscribeUserConversations,
   touchUserPresence,
   type InternalTelecomUser,
   type TelecomConversation,
+  type TelecomGroup,
   type TelecomMessage,
+  type TelecomStatus,
+  updateGroupMembers,
 } from '@/app/lib/internalTelecom';
-import { auth } from '@/app/lib/firebase';
+import { auth, db } from '@/app/lib/firebase';
 import { onForegroundPushMessage, registerPushToken } from '@/app/lib/pushNotifications';
 import { ConversationList } from '@/app/telecom/components/ConversationList';
 import { ChatHeader } from '@/app/telecom/components/ChatHeader';
@@ -41,9 +54,23 @@ export default function SmsPage() {
   const searchParams = useSearchParams();
   const [contacts, setContacts] = useState<InternalTelecomUser[]>([]);
   const [conversations, setConversations] = useState<TelecomConversation[]>([]);
+  const [groups, setGroups] = useState<TelecomGroup[]>([]);
+  const [statuses, setStatuses] = useState<TelecomStatus[]>([]);
   const [messages, setMessages] = useState<TelecomMessage[]>([]);
+  const [activeView, setActiveView] = useState<'sms' | 'statuses'>('sms');
+  const [selectedRowId, setSelectedRowId] = useState('');
+  const [selectedRowType, setSelectedRowType] = useState<'direct' | 'group'>('direct');
   const [selectedUserId, setSelectedUserId] = useState('');
+  const [selectedGroupId, setSelectedGroupId] = useState('');
   const [messageBody, setMessageBody] = useState('');
+  const [newGroupName, setNewGroupName] = useState('');
+  const [newGroupMemberIds, setNewGroupMemberIds] = useState<string[]>([]);
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [showGroupProfile, setShowGroupProfile] = useState(false);
+  const [groupRenameValue, setGroupRenameValue] = useState('');
+  const [groupMemberDraft, setGroupMemberDraft] = useState<string[]>([]);
+  const [statusText, setStatusText] = useState('');
+  const [selectedStatusId, setSelectedStatusId] = useState('');
   const [search, setSearch] = useState('');
   const [notificationStatus, setNotificationStatus] = useState('');
   const [blockingSmsError, setBlockingSmsError] = useState('');
@@ -71,8 +98,17 @@ export default function SmsPage() {
     () => contacts.find((contact) => contact.uid === selectedUserId) || null,
     [contacts, selectedUserId]
   );
+  const selectedGroup = useMemo(
+    () => groups.find((group) => group.id === selectedGroupId) || null,
+    [groups, selectedGroupId]
+  );
 
-  const selectedConversationId = user && selectedUserId ? conversationIdFor(user.uid, selectedUserId) : '';
+  const selectedConversationId = useMemo(() => {
+    if (!user) return '';
+    if (selectedRowType === 'group' && selectedGroupId) return selectedGroupId;
+    if (selectedUserId) return conversationIdFor(user.uid, selectedUserId);
+    return '';
+  }, [selectedGroupId, selectedRowType, selectedUserId, user]);
   const showListPanel = !isMobile || !showConversationMobile;
   const showChatPanel = !isMobile || showConversationMobile;
 
@@ -119,6 +155,13 @@ export default function SmsPage() {
       setSelectedUserId(found.uid);
     }
   }, [contacts, selectedUserId]);
+
+  useEffect(() => {
+    if (!selectedUserId) return;
+    setSelectedRowType('direct');
+    setSelectedGroupId('');
+    setSelectedRowId(`direct:${selectedUserId}`);
+  }, [selectedUserId]);
 
   useEffect(() => {
     if (!user) return;
@@ -301,6 +344,29 @@ export default function SmsPage() {
   }, [user]);
 
   useEffect(() => {
+    if (!user) return;
+    const groupsQuery = query(collection(db, 'telecom_groups'), where('memberIds', 'array-contains', user.uid));
+    const unsub = onSnapshot(groupsQuery, (snap) => {
+      setGroups(
+        snap.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() } as TelecomGroup))
+      );
+    });
+    return () => unsub();
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    return subscribeRecentStatuses(
+      (items) => {
+        setStatuses(items.filter((item) => (item.expiresAt?.seconds || 0) * 1000 > Date.now()));
+      },
+      (error) => {
+        console.warn('[SMS STATUS WARN]', error);
+      }
+    );
+  }, [user]);
+
+  useEffect(() => {
     if (!selectedConversationId || !user) {
       if (activeConversationUnsubRef.current) {
         activeConversationUnsubRef.current();
@@ -318,14 +384,7 @@ export default function SmsPage() {
       activeConversationUnsubRef.current();
       activeConversationUnsubRef.current = null;
     }
-    const unsub = subscribeDirectConversationMessages({
-      currentUserUid: user.uid,
-      currentUserTelecomNumber: user.telecomNumber,
-      peerUid: selectedContact?.uid,
-      peerTelecomNumber: selectedContact?.telecomNumber,
-      conversationId: selectedConversationId,
-      limitCount: messageLimit,
-      callback: (items) => {
+    const callback = (items: TelecomMessage[]) => {
         const mergedItems = mergeServerAndOptimisticMessages(items);
         latestMessagesCountRef.current = mergedItems.length;
         if (mergedItems.length > 0 || hasValidConversationRef.current) {
@@ -351,8 +410,8 @@ export default function SmsPage() {
         }).catch(() => undefined);
         void markConversationMessagesDelivered(selectedConversationId, user.uid).catch(() => undefined);
         void markMessageAsRead(selectedConversationId, user.uid).catch(() => undefined);
-      },
-      onError: (error, queryMeta) => {
+      };
+    const onError = (error: Error, queryMeta: Record<string, unknown>) => {
         console.warn('[SMS LISTENER WARN]', {
           collection: 'telecom_messages',
           whereOrderBy: queryMeta,
@@ -375,8 +434,24 @@ export default function SmsPage() {
             setBlockingSmsError('Lecture des messages impossible pour cette conversation.');
           }
         }, 1200);
-      },
-    });
+      };
+    const unsub = selectedRowType === 'group'
+      ? subscribeConversationMessages(
+        selectedConversationId,
+        callback,
+        (error) => onError(error, { where: [{ conversationId: selectedConversationId }], orderBy: 'createdAt desc' }),
+        messageLimit
+      )
+      : subscribeDirectConversationMessages({
+        currentUserUid: user.uid,
+        currentUserTelecomNumber: user.telecomNumber,
+        peerUid: selectedContact?.uid,
+        peerTelecomNumber: selectedContact?.telecomNumber,
+        conversationId: selectedConversationId,
+        limitCount: messageLimit,
+        callback,
+        onError,
+      });
     activeConversationUnsubRef.current = unsub;
     return () => {
       if (activeConversationUnsubRef.current) {
@@ -388,15 +463,15 @@ export default function SmsPage() {
         conversationErrorTimerRef.current = null;
       }
     };
-  }, [mergeServerAndOptimisticMessages, messageLimit, selectedContact?.telecomNumber, selectedContact?.uid, selectedConversationId, user]);
+  }, [mergeServerAndOptimisticMessages, messageLimit, selectedContact?.telecomNumber, selectedContact?.uid, selectedConversationId, selectedRowType, user]);
 
   useEffect(() => {
-    if (!selectedContact || !selectedConversationId) {
+    if (selectedRowType === 'group' || !selectedContact || !selectedConversationId) {
       setIsPeerTyping(false);
       return;
     }
     return subscribeTypingState(selectedContact.uid, selectedConversationId, setIsPeerTyping);
-  }, [selectedContact, selectedConversationId]);
+  }, [selectedContact, selectedConversationId, selectedRowType]);
 
   useEffect(() => {
     const el = messagesContainerRef.current;
@@ -405,7 +480,9 @@ export default function SmsPage() {
   }, [messages.length, selectedConversationId]);
 
   const sendMessage = useCallback(async () => {
-    if (!user || !selectedContact || sending) return;
+    if (!user || sending) return;
+    const isGroupConversation = selectedRowType === 'group' && Boolean(selectedGroupId);
+    if (!isGroupConversation && !selectedContact) return;
     const outgoingBody = messageBody.trim();
     if (!outgoingBody) return;
     const tempId = `temp-${Date.now()}-${optimisticCounterRef.current++}`;
@@ -413,8 +490,9 @@ export default function SmsPage() {
     const optimisticMessage: TelecomMessage = {
       id: tempId,
       conversationId: selectedConversationId,
+      groupId: isGroupConversation ? selectedGroupId : null,
       senderId: user.uid,
-      receiverId: selectedContact.uid,
+      receiverId: isGroupConversation ? user.uid : (selectedContact?.uid || user.uid),
       body: outgoingBody,
       status: 'sent',
       type: 'text',
@@ -430,12 +508,19 @@ export default function SmsPage() {
     setMessageBody('');
     setSending(true);
     try {
-      const messageId = await sendInternalMessage({
-        senderId: user.uid,
-        receiverId: selectedContact.uid,
-        body: outgoingBody,
-        type: 'text',
-      });
+      const messageId = isGroupConversation
+        ? await sendGroupMessage({
+          conversationId: selectedConversationId,
+          groupId: selectedGroupId,
+          senderId: user.uid,
+          body: outgoingBody,
+        })
+        : await sendInternalMessage({
+          senderId: user.uid,
+          receiverId: selectedContact?.uid || '',
+          body: outgoingBody,
+          type: 'text',
+        });
       const optimisticCurrent = optimisticMessagesRef.current.get(tempId);
       optimisticMessagesRef.current.delete(tempId);
       if (optimisticCurrent) {
@@ -444,8 +529,12 @@ export default function SmsPage() {
       setMessages((current) =>
         current.map((item) => (item.id === tempId ? { ...item, id: messageId } : item))
       );
-      void sendInternalMessagePush(messageId);
-      void setTypingState(user.uid, selectedConversationId, false);
+      if (!isGroupConversation) {
+        void sendInternalMessagePush(messageId);
+      }
+      if (!isGroupConversation) {
+        void setTypingState(user.uid, selectedConversationId, false);
+      }
     } catch (error) {
       optimisticMessagesRef.current.delete(tempId);
       setMessages((current) => current.filter((item) => item.id !== tempId));
@@ -459,11 +548,11 @@ export default function SmsPage() {
     } finally {
       setSending(false);
     }
-  }, [messageBody, selectedContact, selectedConversationId, sending, showToast, user]);
+  }, [messageBody, selectedContact, selectedConversationId, selectedGroupId, selectedRowType, sending, showToast, user]);
 
   const handleMessageChange = useCallback((value: string) => {
     setMessageBody(value);
-    if (!user || !selectedConversationId) return;
+    if (!user || !selectedConversationId || selectedRowType === 'group') return;
     void setTypingState(user.uid, selectedConversationId, true);
     if (typingTimeoutRef.current) {
       window.clearTimeout(typingTimeoutRef.current);
@@ -471,7 +560,7 @@ export default function SmsPage() {
     typingTimeoutRef.current = window.setTimeout(() => {
       void setTypingState(user.uid, selectedConversationId, false);
     }, 1400);
-  }, [selectedConversationId, user]);
+  }, [selectedConversationId, selectedRowType, user]);
 
   useEffect(() => {
     return () => {
@@ -491,26 +580,132 @@ export default function SmsPage() {
   }, [selectedConversationId, user?.uid]);
 
   const conversationRows = useMemo(() => {
-    return contacts
+    if (!user) return [];
+    const directRows = contacts
       .map((contact) => {
-        const conversationId = user ? conversationIdFor(user.uid, contact.uid) : '';
+        const conversationId = conversationIdFor(user.uid, contact.uid);
         const conversation = conversations.find((item) => item.id === conversationId);
         return {
-          contact,
+          id: `direct:${contact.uid}`,
+          kind: 'direct' as const,
+          title: contact.name,
+          subtitle: contact.telecomNumber,
+          presence: contact.presenceStatus,
+          roleLabel: contact.role,
+          contactUid: contact.uid,
           conversation,
-          unread: user ? conversation?.unreadCountByUser?.[user.uid] || 0 : 0,
+          unread: conversation?.unreadCountByUser?.[user.uid] || 0,
         };
-      })
+      });
+    const groupRows = conversations
+      .filter((conversation) => conversation.type === 'group')
+      .map((conversation) => ({
+        id: `group:${conversation.groupId || conversation.id}`,
+        kind: 'group' as const,
+        title: conversation.title || 'Groupe Bizaflow',
+        subtitle: `${conversation.participantIds?.length || 0} membres`,
+        conversation,
+        unread: conversation.unreadCountByUser?.[user.uid] || 0,
+      }));
+    return [...directRows, ...groupRows]
       .sort((a, b) => {
         const aTs = a.conversation?.lastMessageAt?.seconds || 0;
         const bTs = b.conversation?.lastMessageAt?.seconds || 0;
         if (aTs !== bTs) return bTs - aTs;
-        return a.contact.name.localeCompare(b.contact.name);
+        return a.title.localeCompare(b.title);
       });
   }, [contacts, conversations, user]);
+
+  useEffect(() => {
+    if (!conversationRows.length) return;
+    if (selectedRowId && conversationRows.some((row) => row.id === selectedRowId)) return;
+    const first = conversationRows[0];
+    setSelectedRowId(first.id);
+    setSelectedRowType(first.kind);
+    if (first.kind === 'group') {
+      setSelectedGroupId(first.conversation?.groupId || first.conversation?.id || '');
+      setSelectedUserId('');
+    } else {
+      setSelectedUserId(first.contactUid || '');
+      setSelectedGroupId('');
+    }
+  }, [conversationRows, selectedRowId]);
   useEffect(() => {
     setMessageLimit(40);
   }, [selectedConversationId]);
+
+  const selectedStatus = useMemo(
+    () => statuses.find((status) => status.id === selectedStatusId) || null,
+    [selectedStatusId, statuses]
+  );
+
+  const createGroup = useCallback(async () => {
+    if (!user) return;
+    try {
+      const result = await createInternalGroup({
+        name: newGroupName,
+        memberIds: newGroupMemberIds,
+        createdBy: user.uid,
+      });
+      setShowCreateGroup(false);
+      setNewGroupName('');
+      setNewGroupMemberIds([]);
+      showToast({ message: 'Groupe créé', variant: 'success' });
+      setSelectedRowType('group');
+      setSelectedGroupId(result.groupId);
+      setSelectedUserId('');
+      setSelectedRowId(`group:${result.groupId}`);
+    } catch (error) {
+      showToast({ message: explainError(error instanceof Error ? error.message : 'Création groupe impossible'), variant: 'error' });
+    }
+  }, [newGroupMemberIds, newGroupName, showToast, user]);
+
+  useEffect(() => {
+    if (!showGroupProfile || !selectedGroup) return;
+    setGroupMemberDraft(selectedGroup.memberIds || []);
+  }, [selectedGroup, showGroupProfile]);
+
+  const toggleGroupMember = useCallback((uid: string) => {
+    setNewGroupMemberIds((current) => (
+      current.includes(uid) ? current.filter((item) => item !== uid) : [...current, uid]
+    ));
+  }, []);
+
+  const publishStatus = useCallback(async () => {
+    if (!user || !statusText.trim()) return;
+    try {
+      await createTextStatus({
+        userId: user.uid,
+        userName: user.name || user.email || 'Utilisateur Bizaflow',
+        text: statusText,
+        background: '#0f172a',
+      });
+      setStatusText('');
+      showToast({ message: 'Statut publié', variant: 'success' });
+    } catch (error) {
+      showToast({ message: explainError(error instanceof Error ? error.message : 'Publication statut impossible'), variant: 'error' });
+    }
+  }, [showToast, statusText, user]);
+
+  const openStatus = useCallback(async (statusId: string) => {
+    if (!user) return;
+    const status = statuses.find((item) => item.id === statusId);
+    if (!status) return;
+    setSelectedStatusId(statusId);
+    if (status.userId !== user.uid) {
+      await markStatusViewed(statusId, user.uid).catch(() => undefined);
+    }
+  }, [statuses, user]);
+
+  const saveGroupMembers = useCallback(async () => {
+    if (!user || !selectedGroup) return;
+    await updateGroupMembers({
+      groupId: selectedGroup.id,
+      actorId: user.uid,
+      memberIds: groupMemberDraft,
+    });
+    showToast({ message: 'Membres du groupe mis à jour', variant: 'success' });
+  }, [groupMemberDraft, selectedGroup, showToast, user]);
 
   if (!user) return null;
 
@@ -524,7 +719,31 @@ export default function SmsPage() {
           </h1>
           <p style={{ margin: 0, color: '#4a5e7a', fontSize: '0.78rem' }}>Messagerie Bizaflow à Bizaflow</p>
         </div>
-        <div style={{ ...cardStyle, padding: '8px 12px', color: '#10b981', fontSize: '0.72rem', fontWeight: 800 }}>SMS rapide</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            className="btn-primary"
+            style={{ width: 'auto', padding: '8px 12px', opacity: activeView === 'sms' ? 1 : 0.6 }}
+            onClick={() => setActiveView('sms')}
+          >
+            SMS
+          </button>
+          <button
+            className="btn-primary"
+            style={{ width: 'auto', padding: '8px 12px', opacity: activeView === 'statuses' ? 1 : 0.6 }}
+            onClick={() => setActiveView('statuses')}
+          >
+            Statuts
+          </button>
+          {activeView === 'sms' && (
+            <button
+              className="btn-primary"
+              style={{ width: 'auto', padding: '8px 12px' }}
+              onClick={() => setShowCreateGroup(true)}
+            >
+              Nouveau groupe
+            </button>
+          )}
+        </div>
       </div>
 
       {notificationStatus && (
@@ -557,7 +776,8 @@ export default function SmsPage() {
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: showListPanel && showChatPanel ? 'minmax(280px, 360px) 1fr' : '1fr', gap: 12 }}>
+      {activeView === 'sms' ? (
+        <div style={{ display: 'grid', gridTemplateColumns: showListPanel && showChatPanel ? 'minmax(280px, 360px) 1fr' : '1fr', gap: 12 }}>
         {showListPanel && (
           <section style={{ ...cardStyle, padding: 12, minHeight: 520 }}>
             <input
@@ -570,9 +790,17 @@ export default function SmsPage() {
             <ConversationList
               rows={conversationRows}
               search={search}
-              selectedUserId={selectedUserId}
-              onSelect={(userId) => {
-                setSelectedUserId(userId);
+              selectedRowId={selectedRowId}
+              onSelect={(row) => {
+                setSelectedRowId(row.id);
+                setSelectedRowType(row.kind);
+                if (row.kind === 'group') {
+                  setSelectedGroupId(row.conversation?.groupId || row.conversation?.id || '');
+                  setSelectedUserId('');
+                } else {
+                  setSelectedUserId(row.contactUid || '');
+                  setSelectedGroupId('');
+                }
                 if (isMobile) setShowConversationMobile(true);
               }}
             />
@@ -581,13 +809,17 @@ export default function SmsPage() {
 
         {showChatPanel && (
           <section style={{ ...cardStyle, minHeight: 520, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-            {selectedContact ? (
+            {selectedConversationId ? (
               <>
                 <ChatHeader
                   selectedContact={selectedContact}
+                  isGroup={selectedRowType === 'group'}
+                  groupTitle={selectedGroup?.name || selectedGroup?.id}
+                  groupMemberCount={selectedGroup?.memberIds?.length || 0}
                   isMobile={isMobile}
                   isPeerTyping={isPeerTyping}
                   onBack={() => setShowConversationMobile(false)}
+                  onOpenGroupProfile={() => setShowGroupProfile(true)}
                 />
                 <MessageList
                   messages={messages}
@@ -603,7 +835,7 @@ export default function SmsPage() {
                   onChange={handleMessageChange}
                   onSend={() => void sendMessage()}
                   onBlur={() => {
-                    if (user?.uid && selectedConversationId) {
+                    if (user?.uid && selectedConversationId && selectedRowType !== 'group') {
                       void setTypingState(user.uid, selectedConversationId, false);
                     }
                   }}
@@ -614,7 +846,154 @@ export default function SmsPage() {
             )}
           </section>
         )}
-      </div>
+        </div>
+      ) : (
+        <section style={{ ...cardStyle, minHeight: 520, padding: 14, display: 'grid', gap: 12 }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              className="input-field"
+              value={statusText}
+              onChange={(event) => setStatusText(event.target.value)}
+              placeholder="Publier un statut texte..."
+            />
+            <button className="btn-primary" style={{ width: 'auto', padding: '10px 14px' }} onClick={() => void publishStatus()}>
+              Publier statut
+            </button>
+          </div>
+          <div style={{ display: 'grid', gap: 8 }}>
+            {statuses.length === 0 ? (
+              <div style={{ color: '#94a3b8', fontSize: '0.82rem' }}>Aucun statut récent</div>
+            ) : statuses.map((status) => (
+              <button
+                key={status.id}
+                onClick={() => void openStatus(status.id)}
+                style={{ ...cardStyle, padding: 10, textAlign: 'left', background: 'rgba(255,255,255,0.02)', color: '#e2e8f0' }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <strong>{status.userName}{status.userId === user.uid ? ' (Vous)' : ''}</strong>
+                  <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>
+                    {status.createdAt ? formatRelativeDate(status.createdAt.seconds * 1000) : ''}
+                  </span>
+                </div>
+                <div style={{ color: '#cbd5e1', marginTop: 4 }}>{status.text || 'Statut'}</div>
+                <div style={{ color: '#94a3b8', marginTop: 4, fontSize: '0.72rem' }}>
+                  Vues: {status.viewers?.length || 0}
+                </div>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {showCreateGroup && (
+        <div style={activationModalBackdropStyle}>
+          <div style={activationModalStyle}>
+            <h3 style={{ marginTop: 0 }}>Créer un groupe</h3>
+            <input
+              className="input-field"
+              placeholder="Nom du groupe"
+              value={newGroupName}
+              onChange={(event) => setNewGroupName(event.target.value)}
+            />
+            <div style={{ marginTop: 10, maxHeight: 220, overflowY: 'auto', display: 'grid', gap: 6 }}>
+              {contacts.map((contact) => (
+                <label key={contact.uid} style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#cbd5e1' }}>
+                  <input
+                    type="checkbox"
+                    checked={newGroupMemberIds.includes(contact.uid)}
+                    onChange={() => toggleGroupMember(contact.uid)}
+                  />
+                  <span>{contact.name}</span>
+                </label>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <button className="btn-primary" style={{ width: 'auto', padding: '10px 14px' }} onClick={() => void createGroup()}>
+                Créer
+              </button>
+              <button className="btn-primary" style={{ width: 'auto', padding: '10px 14px', opacity: 0.7 }} onClick={() => setShowCreateGroup(false)}>
+                Annuler
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showGroupProfile && selectedGroup && (
+        <div style={activationModalBackdropStyle}>
+          <div style={activationModalStyle}>
+            <h3 style={{ marginTop: 0 }}>Profil groupe</h3>
+            <p style={{ color: '#94a3b8', marginTop: 0 }}>{selectedGroup.name}</p>
+            <input
+              className="input-field"
+              placeholder="Nouveau nom"
+              value={groupRenameValue}
+              onChange={(event) => setGroupRenameValue(event.target.value)}
+            />
+            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+              <button className="btn-primary" style={{ width: 'auto', padding: '10px 14px' }} onClick={() => void renameGroup({
+                groupId: selectedGroup.id,
+                actorId: user.uid,
+                name: groupRenameValue || selectedGroup.name,
+              })}>
+                Renommer
+              </button>
+              <button className="btn-primary" style={{ width: 'auto', padding: '10px 14px' }} onClick={() => void saveGroupMembers()}>
+                Enregistrer membres
+              </button>
+              <button className="btn-primary" style={{ width: 'auto', padding: '10px 14px' }} onClick={() => void leaveGroup(selectedGroup.id, user.uid)}>
+                Quitter groupe
+              </button>
+              <button className="btn-primary" style={{ width: 'auto', padding: '10px 14px', opacity: 0.8 }} onClick={() => void deleteGroup(selectedGroup.id, user.uid)}>
+                Supprimer groupe
+              </button>
+            </div>
+            <div style={{ marginTop: 10, maxHeight: 180, overflowY: 'auto', display: 'grid', gap: 6 }}>
+              {contacts.map((contact) => (
+                <label key={contact.uid} style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#cbd5e1' }}>
+                  <input
+                    type="checkbox"
+                    checked={groupMemberDraft.includes(contact.uid)}
+                    onChange={() => setGroupMemberDraft((current) => (
+                      current.includes(contact.uid)
+                        ? current.filter((uid) => uid !== contact.uid)
+                        : [...current, contact.uid]
+                    ))}
+                  />
+                  <span>{contact.name}</span>
+                </label>
+              ))}
+            </div>
+            <button className="btn-primary" style={{ width: 'auto', padding: '10px 14px', marginTop: 10, opacity: 0.7 }} onClick={() => setShowGroupProfile(false)}>
+              Fermer
+            </button>
+          </div>
+        </div>
+      )}
+
+      {selectedStatus && (
+        <div style={activationModalBackdropStyle} onClick={() => setSelectedStatusId('')}>
+          <div style={{ ...activationModalStyle, minHeight: 260 }}>
+            <div style={{ height: 4, borderRadius: 999, background: 'rgba(255,255,255,0.16)', marginBottom: 10 }}>
+              <div style={{ width: '100%', height: 4, borderRadius: 999, background: '#06b6d4' }} />
+            </div>
+            <div style={{ color: '#94a3b8', fontSize: '0.78rem' }}>{selectedStatus.userName}</div>
+            <div style={{ color: '#e2e8f0', fontSize: '1.02rem', marginTop: 10 }}>{selectedStatus.text}</div>
+            {selectedStatus.userId === user.uid && (
+              <button
+                className="btn-primary"
+                style={{ width: 'auto', padding: '10px 14px', marginTop: 16 }}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void deleteOwnStatus(selectedStatus.id, user.uid).then(() => setSelectedStatusId(''));
+                }}
+              >
+                Supprimer
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -676,4 +1055,11 @@ function buildMessageDedupeKey(messageId?: string, senderId?: string, body?: str
 
 function buildLocalTimestamp(): TelecomMessage['createdAt'] {
   return Timestamp.now();
+}
+
+function formatRelativeDate(ms: number): string {
+  const delta = Date.now() - ms;
+  if (delta < 60_000) return 'à l’instant';
+  if (delta < 3_600_000) return `il y a ${Math.max(1, Math.floor(delta / 60_000))} min`;
+  return `il y a ${Math.max(1, Math.floor(delta / 3_600_000))} h`;
 }

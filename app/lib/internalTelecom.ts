@@ -2,6 +2,7 @@ import {
   addDoc,
   arrayUnion,
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -40,6 +41,10 @@ export interface InternalTelecomUser {
 
 export interface TelecomConversation {
   id: string;
+  type?: 'direct' | 'group';
+  groupId?: string | null;
+  title?: string;
+  photoUrl?: string | null;
   participantIds: string[];
   participantNumbers?: string[];
   participants?: string[];
@@ -54,6 +59,7 @@ export interface TelecomConversation {
 export interface TelecomMessage {
   id: string;
   conversationId: string;
+  groupId?: string | null;
   senderId: string;
   receiverId: string;
   senderUserId?: string;
@@ -71,11 +77,37 @@ export interface TelecomMessage {
   replyToMessageId?: string | null;
   reactionsByUser?: Record<string, string>;
   status: MessageStatus;
+  statusByUser?: Record<string, MessageStatus>;
   deliveredAt?: Timestamp | null;
   readAt?: Timestamp | null;
   editedAt?: Timestamp | null;
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
+}
+
+export interface TelecomGroup {
+  id: string;
+  name: string;
+  photoUrl?: string | null;
+  memberIds: string[];
+  adminIds: string[];
+  createdBy: string;
+  createdAt: Timestamp | null;
+  updatedAt: Timestamp | null;
+}
+
+export interface TelecomStatus {
+  id: string;
+  userId: string;
+  userName: string;
+  userPhotoUrl?: string | null;
+  type: 'text' | 'image';
+  text?: string;
+  mediaUrl?: string | null;
+  background?: string | null;
+  viewers: string[];
+  expiresAt: Timestamp | null;
+  createdAt: Timestamp | null;
 }
 
 export function subscribeDirectConversationMessages(input: {
@@ -562,6 +594,318 @@ export async function sendInternalMessage(input: {
   });
 
   return messageRef.id;
+}
+
+export async function createInternalGroup(input: {
+  name: string;
+  photoUrl?: string | null;
+  memberIds: string[];
+  createdBy: string;
+}): Promise<{ groupId: string; conversationId: string }> {
+  const name = input.name.trim();
+  if (!name) throw new Error('GROUP_NAME_REQUIRED');
+  const members = Array.from(new Set([...input.memberIds, input.createdBy])).filter(Boolean);
+  if (members.length < 2) throw new Error('GROUP_MEMBERS_REQUIRED');
+  const now = serverTimestamp();
+  const groupRef = await addDoc(collection(db, 'telecom_groups'), {
+    name,
+    photoUrl: input.photoUrl || null,
+    memberIds: members,
+    adminIds: [input.createdBy],
+    createdBy: input.createdBy,
+    createdAt: now,
+    updatedAt: now,
+  });
+  const conversationId = groupRef.id;
+  await setDoc(doc(db, 'telecom_conversations', conversationId), {
+    type: 'group',
+    groupId: groupRef.id,
+    participantIds: members,
+    participants: members,
+    title: name,
+    photoUrl: input.photoUrl || null,
+    lastMessage: 'Vous avez créé le groupe',
+    lastMessageAt: now,
+    unreadCountByUser: members.reduce((acc, uid) => {
+      acc[uid] = uid === input.createdBy ? 0 : 1;
+      return acc;
+    }, {} as Record<string, number>),
+    createdAt: now,
+    updatedAt: now,
+  }, { merge: true });
+  await addDoc(collection(db, 'telecom_messages'), {
+    conversationId,
+    groupId: groupRef.id,
+    senderId: input.createdBy,
+    receiverId: input.createdBy,
+    senderUserId: input.createdBy,
+    targetUserId: null,
+    body: 'Vous avez créé le groupe',
+    type: 'system',
+    participantIds: members,
+    participantNumbers: [],
+    status: 'sent',
+    statusByUser: { [input.createdBy]: 'read' },
+    createdAt: now,
+    updatedAt: now,
+  });
+  return { groupId: groupRef.id, conversationId };
+}
+
+export async function sendGroupMessage(input: {
+  conversationId: string;
+  groupId: string;
+  senderId: string;
+  body: string;
+}): Promise<string> {
+  const body = input.body.trim();
+  if (!body) throw new Error('MESSAGE_BODY_REQUIRED');
+  const groupSnap = await getDoc(doc(db, 'telecom_groups', input.groupId));
+  if (!groupSnap.exists()) throw new Error('GROUP_NOT_FOUND');
+  const group = groupSnap.data() as TelecomGroup;
+  if (!group.memberIds.includes(input.senderId)) throw new Error('GROUP_WRITE_FORBIDDEN');
+  const now = serverTimestamp();
+  const statusByUser = group.memberIds.reduce((acc, uid) => {
+    acc[uid] = uid === input.senderId ? 'read' : 'delivered';
+    return acc;
+  }, {} as Record<string, MessageStatus>);
+  const messageRef = await addDoc(collection(db, 'telecom_messages'), {
+    conversationId: input.conversationId,
+    groupId: input.groupId,
+    senderId: input.senderId,
+    receiverId: input.senderId,
+    senderUserId: input.senderId,
+    targetUserId: null,
+    body,
+    type: 'text',
+    participantIds: group.memberIds,
+    participantNumbers: [],
+    status: 'sent',
+    statusByUser,
+    createdAt: now,
+    updatedAt: now,
+  });
+  await setDoc(doc(db, 'telecom_conversations', input.conversationId), {
+    type: 'group',
+    groupId: input.groupId,
+    participantIds: group.memberIds,
+    participants: group.memberIds,
+    lastMessage: body,
+    lastMessageAt: now,
+    unreadCountByUser: group.memberIds.reduce((acc, uid) => {
+      acc[`unreadCountByUser.${uid}`] = uid === input.senderId ? 0 : increment(1);
+      return acc;
+    }, {} as Record<string, unknown>),
+    updatedAt: now,
+  }, { merge: true });
+  return messageRef.id;
+}
+
+export async function updateGroupMembers(input: {
+  groupId: string;
+  actorId: string;
+  memberIds: string[];
+}): Promise<void> {
+  const groupRef = doc(db, 'telecom_groups', input.groupId);
+  const groupSnap = await getDoc(groupRef);
+  if (!groupSnap.exists()) throw new Error('GROUP_NOT_FOUND');
+  const group = groupSnap.data() as TelecomGroup;
+  if (!group.adminIds.includes(input.actorId)) throw new Error('GROUP_ADMIN_REQUIRED');
+  const nextMembers = Array.from(new Set(input.memberIds)).filter(Boolean);
+  if (!nextMembers.includes(input.actorId)) throw new Error('GROUP_ADMIN_MUST_STAY');
+  await setDoc(groupRef, { memberIds: nextMembers, updatedAt: serverTimestamp() }, { merge: true });
+  await setDoc(doc(db, 'telecom_conversations', input.groupId), {
+    participantIds: nextMembers,
+    participants: nextMembers,
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+  const joined = nextMembers.filter((uid) => !group.memberIds.includes(uid));
+  const left = group.memberIds.filter((uid) => !nextMembers.includes(uid));
+  for (const uid of joined) {
+    await addDoc(collection(db, 'telecom_messages'), {
+      conversationId: input.groupId,
+      groupId: input.groupId,
+      senderId: input.actorId,
+      receiverId: input.actorId,
+      senderUserId: input.actorId,
+      targetUserId: null,
+      body: `${uid} a rejoint le groupe`,
+      type: 'system',
+      participantIds: nextMembers,
+      participantNumbers: [],
+      status: 'sent',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+  for (const uid of left) {
+    await addDoc(collection(db, 'telecom_messages'), {
+      conversationId: input.groupId,
+      groupId: input.groupId,
+      senderId: input.actorId,
+      receiverId: input.actorId,
+      senderUserId: input.actorId,
+      targetUserId: null,
+      body: `${uid} a quitté le groupe`,
+      type: 'system',
+      participantIds: nextMembers,
+      participantNumbers: [],
+      status: 'sent',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+}
+
+export async function renameGroup(input: {
+  groupId: string;
+  actorId: string;
+  name: string;
+}): Promise<void> {
+  const name = input.name.trim();
+  if (!name) throw new Error('GROUP_NAME_REQUIRED');
+  const groupRef = doc(db, 'telecom_groups', input.groupId);
+  const groupSnap = await getDoc(groupRef);
+  if (!groupSnap.exists()) throw new Error('GROUP_NOT_FOUND');
+  const group = groupSnap.data() as TelecomGroup;
+  if (!group.adminIds.includes(input.actorId)) throw new Error('GROUP_ADMIN_REQUIRED');
+  await setDoc(groupRef, { name, updatedAt: serverTimestamp() }, { merge: true });
+  await setDoc(doc(db, 'telecom_conversations', input.groupId), {
+    title: name,
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+  await addDoc(collection(db, 'telecom_messages'), {
+    conversationId: input.groupId,
+    groupId: input.groupId,
+    senderId: input.actorId,
+    receiverId: input.actorId,
+    senderUserId: input.actorId,
+    targetUserId: null,
+    body: 'Le nom du groupe a été modifié',
+    type: 'system',
+    participantIds: group.memberIds,
+    participantNumbers: [],
+    status: 'sent',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function leaveGroup(groupId: string, userId: string): Promise<void> {
+  const groupRef = doc(db, 'telecom_groups', groupId);
+  const groupSnap = await getDoc(groupRef);
+  if (!groupSnap.exists()) throw new Error('GROUP_NOT_FOUND');
+  const group = groupSnap.data() as TelecomGroup;
+  if (!group.memberIds.includes(userId)) return;
+  const nextMembers = group.memberIds.filter((uid) => uid !== userId);
+  const nextAdmins = group.adminIds.filter((uid) => uid !== userId);
+  if (nextMembers.length === 0) {
+    await deleteDoc(groupRef);
+    await deleteDoc(doc(db, 'telecom_conversations', groupId));
+    return;
+  }
+  const finalAdmins = nextAdmins.length ? nextAdmins : [nextMembers[0]];
+  await setDoc(groupRef, {
+    memberIds: nextMembers,
+    adminIds: finalAdmins,
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+  await setDoc(doc(db, 'telecom_conversations', groupId), {
+    participantIds: nextMembers,
+    participants: nextMembers,
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+  await addDoc(collection(db, 'telecom_messages'), {
+    conversationId: groupId,
+    groupId,
+    senderId: userId,
+    receiverId: userId,
+    senderUserId: userId,
+    targetUserId: null,
+    body: `${userId} a quitté le groupe`,
+    type: 'system',
+    participantIds: nextMembers,
+    participantNumbers: [],
+    status: 'sent',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function deleteGroup(groupId: string, actorId: string): Promise<void> {
+  const groupRef = doc(db, 'telecom_groups', groupId);
+  const groupSnap = await getDoc(groupRef);
+  if (!groupSnap.exists()) return;
+  const group = groupSnap.data() as TelecomGroup;
+  if (!group.adminIds.includes(actorId)) throw new Error('GROUP_ADMIN_REQUIRED');
+  await deleteDoc(groupRef);
+  await deleteDoc(doc(db, 'telecom_conversations', groupId));
+}
+
+export async function createTextStatus(input: {
+  userId: string;
+  userName: string;
+  userPhotoUrl?: string | null;
+  text: string;
+  background?: string | null;
+}): Promise<string> {
+  const text = input.text.trim();
+  if (!text) throw new Error('STATUS_TEXT_REQUIRED');
+  const now = FirestoreTimestamp.now();
+  const expires = FirestoreTimestamp.fromMillis(now.toMillis() + 24 * 60 * 60 * 1000);
+  const statusRef = await addDoc(collection(db, 'telecom_statuses'), {
+    userId: input.userId,
+    userName: input.userName,
+    userPhotoUrl: input.userPhotoUrl || null,
+    type: 'text',
+    text,
+    mediaUrl: null,
+    background: input.background || '#0f172a',
+    viewers: [],
+    expiresAt: expires,
+    createdAt: serverTimestamp(),
+  });
+  return statusRef.id;
+}
+
+export function subscribeRecentStatuses(
+  callback: (statuses: TelecomStatus[]) => void,
+  onError?: (error: Error) => void
+): Unsubscribe {
+  const statusesQuery = query(
+    collection(db, 'telecom_statuses'),
+    where('expiresAt', '>', FirestoreTimestamp.now()),
+    orderBy('expiresAt', 'asc'),
+    limit(80)
+  );
+  return onSnapshot(
+    statusesQuery,
+    (snap) => {
+      callback(
+        snap.docs
+          .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() } as TelecomStatus))
+          .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0))
+      );
+    },
+    (error) => onError?.(error)
+  );
+}
+
+export async function markStatusViewed(statusId: string, viewerId: string): Promise<void> {
+  await setDoc(
+    doc(db, 'telecom_statuses', statusId),
+    { viewers: arrayUnion(viewerId) },
+    { merge: true }
+  );
+}
+
+export async function deleteOwnStatus(statusId: string, userId: string): Promise<void> {
+  const statusRef = doc(db, 'telecom_statuses', statusId);
+  const snap = await getDoc(statusRef);
+  if (!snap.exists()) return;
+  const data = snap.data() as TelecomStatus;
+  if (data.userId !== userId) throw new Error('STATUS_DELETE_FORBIDDEN');
+  await deleteDoc(statusRef);
 }
 
 export async function enrichConversationParticipantsMeta(input: {
