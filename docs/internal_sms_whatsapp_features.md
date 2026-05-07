@@ -1,13 +1,13 @@
 # Internal SMS WhatsApp-like Features (Phase 1)
 
-## Fonctionnalites ajoutees (Phase 1)
+## Fonctionnalites livrees (Phase 1)
 - Stabilisation de la messagerie SMS interne existante sans casser les flux actuels.
 - UI SMS modernisee (style messagerie moderne) avec:
   - liste conversations + dernier message + heure,
   - compteur non lus,
   - chat plein ecran mobile avec bouton retour,
   - input fixe en bas.
-- Messages texte:
+- Messages texte uniquement:
   - envoi/reception temps reel,
   - statuts visuels `sent / delivered / read` pour les messages envoyes,
   - separateur par date (`Aujourd'hui`, `Hier`, date complete).
@@ -32,9 +32,9 @@
 - `app/telecom/components/ChatHeader.tsx`
   - composant en-tete chat (presence + typing + retour mobile).
 - `app/telecom/components/MessageList.tsx`
-  - composant messages (separateurs date + statut + bouton charger ancien).
+  - composant messages texte (separateurs date + statut + bouton charger ancien).
 - `app/telecom/components/MessageComposer.tsx`
-  - composant input fixe et envoi message.
+  - composant input fixe et envoi texte (sans media/vocal/reaction/reponse).
 - `app/lib/internalTelecom.ts`
   - ajout `markConversationMessagesDelivered(...)`,
   - ajout `setTypingState(...)`,
@@ -73,6 +73,11 @@
 - Pas encore de reactions emoji ni reponses message.
 - Pas encore de groupes, archivage avance et recherche globale.
 - Pas encore de separation appels audio/video (prevu Phase 4).
+
+## Verification phase
+- `npm run lint`: OK (warnings non bloquants uniquement).
+- `npm run build`: OK.
+- Flux cibles verifies en UI: conversations, lecture messages, envoi texte, statuts, presence, typing, mobile.
 
 ## Prochaines etapes
 - Phase 2: medias (images/docs/vocaux), reactions, reponses.
