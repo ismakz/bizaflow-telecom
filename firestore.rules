@@ -94,10 +94,16 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/telecom_conversations/$(conversationId)).data.participantIds;
     }
 
+    function conversationParticipants(conversationId) {
+      return get(/databases/$(database)/documents/telecom_conversations/$(conversationId)).data.participants;
+    }
+
     function isConversationParticipant(conversationId) {
       return conversationExists(conversationId)
-        && conversationParticipantIds(conversationId) is list
-        && conversationParticipantIds(conversationId).hasAny([request.auth.uid]);
+        && (
+          (conversationParticipantIds(conversationId) is list && request.auth.uid in conversationParticipantIds(conversationId)) ||
+          (conversationParticipants(conversationId) is list && request.auth.uid in conversationParticipants(conversationId))
+        );
     }
 
     function isSafeSelfUserUpdate(uid) {
@@ -288,8 +294,10 @@ service cloud.firestore {
     match /telecom_conversations/{conversationId} {
       allow read: if isCEO() || (
         isApproved()
-        && resource.data.participantIds is list
-        && resource.data.participantIds.hasAny([request.auth.uid])
+        && (
+          (resource.data.participantIds is list && request.auth.uid in resource.data.participantIds) ||
+          (resource.data.participants is list && request.auth.uid in resource.data.participants)
+        )
       );
 
       allow create: if (
@@ -308,8 +316,10 @@ service cloud.firestore {
 
       allow update: if isCEO() || (
         isApproved()
-        && resource.data.participantIds is list
-        && resource.data.participantIds.hasAny([request.auth.uid])
+        && (
+          (resource.data.participantIds is list && request.auth.uid in resource.data.participantIds) ||
+          (resource.data.participants is list && request.auth.uid in resource.data.participants)
+        )
       );
 
       allow delete: if isCEO();
