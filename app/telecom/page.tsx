@@ -45,6 +45,7 @@ export default function SmsPage() {
   const [messageBody, setMessageBody] = useState('');
   const [search, setSearch] = useState('');
   const [notificationStatus, setNotificationStatus] = useState('');
+  const [blockingSmsError, setBlockingSmsError] = useState('');
   const [sending, setSending] = useState(false);
   const [messageLimit, setMessageLimit] = useState(40);
   const [isMobile, setIsMobile] = useState(false);
@@ -58,8 +59,10 @@ export default function SmsPage() {
   const typingTimeoutRef = useRef<number | null>(null);
   const incomingMessagesInitializedRef = useRef(false);
   const notifiedMessageIdsRef = useRef<Set<string>>(new Set());
-  const conversationErrorToastShownRef = useRef(false);
-  const incomingErrorToastShownRef = useRef(false);
+  const activeConversationUnsubRef = useRef<(() => void) | null>(null);
+  const conversationErrorTimerRef = useRef<number | null>(null);
+  const latestMessagesCountRef = useRef(0);
+  const hasValidConversationRef = useRef(false);
 
   const selectedContact = useMemo(
     () => contacts.find((contact) => contact.uid === selectedUserId) || null,
@@ -195,6 +198,19 @@ export default function SmsPage() {
   }, [isMobile, playMessageSound, showToast]);
 
   useEffect(() => {
+    hasValidConversationRef.current = Boolean(
+      selectedConversationId && conversations.some((conversation) => conversation.id === selectedConversationId)
+    );
+    if (hasValidConversationRef.current || latestMessagesCountRef.current > 0) {
+      setBlockingSmsError('');
+      if (conversationErrorTimerRef.current) {
+        window.clearTimeout(conversationErrorTimerRef.current);
+        conversationErrorTimerRef.current = null;
+      }
+    }
+  }, [conversations, selectedConversationId]);
+
+  useEffect(() => {
     if (!user || user.status !== 'approved') return;
     incomingMessagesInitializedRef.current = false;
     const unsubIncoming = subscribeIncomingMessages(
@@ -218,7 +234,7 @@ export default function SmsPage() {
         });
       },
       (error) => {
-        console.error('[SMS LISTENER ERROR]', {
+        console.warn('[SMS LISTENER WARN]', {
           collection: 'telecom_messages',
           whereOrderBy: { where: [{ receiverId: user.uid }], orderBy: 'createdAt desc' },
           conversationId: null,
@@ -230,12 +246,6 @@ export default function SmsPage() {
           errorMessage: error instanceof Error ? error.message : String(error),
           error,
         });
-        if (error instanceof FirebaseError && error.code === 'permission-denied') {
-          if (!incomingErrorToastShownRef.current) {
-            incomingErrorToastShownRef.current = true;
-            setNotificationStatus('Accès messages refusé. Vérifiez les permissions de votre compte.');
-          }
-        }
       }
     );
     return () => unsubIncoming();
@@ -254,7 +264,7 @@ export default function SmsPage() {
       user.uid,
       setConversations,
       (error) => {
-        console.error('[SMS LISTENER ERROR]', {
+        console.warn('[SMS LISTENER WARN]', {
           collection: 'telecom_conversations',
           query: [
             { participantIdsArrayContains: user.uid },
@@ -274,10 +284,22 @@ export default function SmsPage() {
 
   useEffect(() => {
     if (!selectedConversationId || !user) {
+      if (activeConversationUnsubRef.current) {
+        activeConversationUnsubRef.current();
+        activeConversationUnsubRef.current = null;
+      }
+      if (conversationErrorTimerRef.current) {
+        window.clearTimeout(conversationErrorTimerRef.current);
+        conversationErrorTimerRef.current = null;
+      }
+      latestMessagesCountRef.current = 0;
       setMessages([]);
       return;
     }
-    conversationErrorToastShownRef.current = false;
+    if (activeConversationUnsubRef.current) {
+      activeConversationUnsubRef.current();
+      activeConversationUnsubRef.current = null;
+    }
     const unsub = subscribeDirectConversationMessages({
       currentUserUid: user.uid,
       currentUserTelecomNumber: user.telecomNumber,
@@ -286,6 +308,14 @@ export default function SmsPage() {
       conversationId: selectedConversationId,
       limitCount: messageLimit,
       callback: (items) => {
+        latestMessagesCountRef.current = items.length;
+        if (items.length > 0 || hasValidConversationRef.current) {
+          setBlockingSmsError('');
+          if (conversationErrorTimerRef.current) {
+            window.clearTimeout(conversationErrorTimerRef.current);
+            conversationErrorTimerRef.current = null;
+          }
+        }
         setMessages(items);
         void enrichConversationParticipantsMeta({
           currentUserUid: user.uid,
@@ -304,7 +334,7 @@ export default function SmsPage() {
         void markMessageAsRead(selectedConversationId, user.uid).catch(() => undefined);
       },
       onError: (error, queryMeta) => {
-        console.error('[SMS LISTENER ERROR]', {
+        console.warn('[SMS LISTENER WARN]', {
           collection: 'telecom_messages',
           whereOrderBy: queryMeta,
           conversationId: selectedConversationId,
@@ -316,13 +346,29 @@ export default function SmsPage() {
           errorMessage: error instanceof Error ? error.message : String(error),
           error,
         });
-        if (!conversationErrorToastShownRef.current) {
-          conversationErrorToastShownRef.current = true;
-          setNotificationStatus('Accès conversation refusé. Vérifiez les permissions de ce chat.');
+        if (conversationErrorTimerRef.current) {
+          window.clearTimeout(conversationErrorTimerRef.current);
         }
+        conversationErrorTimerRef.current = window.setTimeout(() => {
+          const noMessagesReadable = latestMessagesCountRef.current === 0;
+          const noValidConversation = !hasValidConversationRef.current;
+          if (noMessagesReadable && noValidConversation) {
+            setBlockingSmsError('Lecture des messages impossible pour cette conversation.');
+          }
+        }, 1200);
       },
     });
-    return () => unsub();
+    activeConversationUnsubRef.current = unsub;
+    return () => {
+      if (activeConversationUnsubRef.current) {
+        activeConversationUnsubRef.current();
+        activeConversationUnsubRef.current = null;
+      }
+      if (conversationErrorTimerRef.current) {
+        window.clearTimeout(conversationErrorTimerRef.current);
+        conversationErrorTimerRef.current = null;
+      }
+    };
   }, [messageLimit, selectedContact?.telecomNumber, selectedContact?.uid, selectedConversationId, user]);
 
   useEffect(() => {
@@ -382,6 +428,14 @@ export default function SmsPage() {
       if (user?.uid && selectedConversationId) {
         void setTypingState(user.uid, selectedConversationId, false);
       }
+      if (activeConversationUnsubRef.current) {
+        activeConversationUnsubRef.current();
+        activeConversationUnsubRef.current = null;
+      }
+      if (conversationErrorTimerRef.current) {
+        window.clearTimeout(conversationErrorTimerRef.current);
+        conversationErrorTimerRef.current = null;
+      }
     };
   }, [selectedConversationId, user?.uid]);
 
@@ -425,6 +479,11 @@ export default function SmsPage() {
       {notificationStatus && (
         <div style={{ ...cardStyle, padding: '9px 12px', marginBottom: 12, color: notificationStatus.startsWith('Notifications') ? '#10b981' : '#f59e0b', fontSize: '0.76rem' }}>
           {notificationStatus}
+        </div>
+      )}
+      {blockingSmsError && (
+        <div style={{ ...cardStyle, padding: '9px 12px', marginBottom: 12, color: '#f59e0b', fontSize: '0.76rem' }}>
+          {blockingSmsError}
         </div>
       )}
 
