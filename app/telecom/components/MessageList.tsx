@@ -44,9 +44,13 @@ export function MessageList(props: {
             }}>
               {message.body}
             </div>
-            <div style={{ color: '#64748b', fontSize: '0.62rem', marginTop: 3, textAlign: mine ? 'right' : 'left' }}>
+            <div style={{ color: '#64748b', fontSize: '0.62rem', marginTop: 3, textAlign: mine ? 'right' : 'left', display: 'flex', alignItems: 'center', justifyContent: mine ? 'flex-end' : 'flex-start', gap: 5 }}>
               {formatTime(message.createdAt ? new Date(message.createdAt.seconds * 1000).toISOString() : null)}
-              {mine ? ` · ${renderMessageStatus(message.status)}` : ''}
+              {mine ? (
+                <span style={{ color: statusMeta(message.status).color, fontWeight: 800 }}>
+                  {statusMeta(message.status).label}
+                </span>
+              ) : null}
             </div>
           </div>
         );
@@ -66,10 +70,10 @@ const loadOlderStyle = {
   cursor: 'pointer',
 } satisfies React.CSSProperties;
 
-function renderMessageStatus(status: MessageStatus): string {
-  if (status === 'read') return '✓✓ lu';
-  if (status === 'delivered') return '✓✓ reçu';
-  return '✓ envoyé';
+function statusMeta(status: MessageStatus): { label: string; color: string } {
+  if (status === 'read') return { label: '✓✓', color: '#22c55e' };
+  if (status === 'delivered') return { label: '✓✓', color: '#94a3b8' };
+  return { label: '✓', color: '#cbd5e1' };
 }
 
 function formatDateSeparator(date: Date): string {
