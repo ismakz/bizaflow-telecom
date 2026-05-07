@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { FirebaseError } from 'firebase/app';
+import { Timestamp } from 'firebase/firestore';
 import { useApp } from '@/app/components/AppProvider';
 import {
   backfillMessageParticipantMeta,
@@ -63,6 +64,8 @@ export default function SmsPage() {
   const conversationErrorTimerRef = useRef<number | null>(null);
   const latestMessagesCountRef = useRef(0);
   const hasValidConversationRef = useRef(false);
+  const optimisticMessagesRef = useRef<Map<string, TelecomMessage>>(new Map());
+  const optimisticCounterRef = useRef(0);
 
   const selectedContact = useMemo(
     () => contacts.find((contact) => contact.uid === selectedUserId) || null,
@@ -72,6 +75,21 @@ export default function SmsPage() {
   const selectedConversationId = user && selectedUserId ? conversationIdFor(user.uid, selectedUserId) : '';
   const showListPanel = !isMobile || !showConversationMobile;
   const showChatPanel = !isMobile || showConversationMobile;
+
+  const mergeServerAndOptimisticMessages = useCallback((serverItems: TelecomMessage[]) => {
+    const optimistic = optimisticMessagesRef.current;
+    serverItems.forEach((item) => {
+      if (optimistic.has(item.id)) optimistic.delete(item.id);
+    });
+    const merged = new Map<string, TelecomMessage>();
+    serverItems.forEach((item) => merged.set(item.id, item));
+    optimistic.forEach((item) => {
+      if (item.conversationId === selectedConversationId) {
+        merged.set(item.id, item);
+      }
+    });
+    return [...merged.values()].sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0));
+  }, [selectedConversationId]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -308,15 +326,16 @@ export default function SmsPage() {
       conversationId: selectedConversationId,
       limitCount: messageLimit,
       callback: (items) => {
-        latestMessagesCountRef.current = items.length;
-        if (items.length > 0 || hasValidConversationRef.current) {
+        const mergedItems = mergeServerAndOptimisticMessages(items);
+        latestMessagesCountRef.current = mergedItems.length;
+        if (mergedItems.length > 0 || hasValidConversationRef.current) {
           setBlockingSmsError('');
           if (conversationErrorTimerRef.current) {
             window.clearTimeout(conversationErrorTimerRef.current);
             conversationErrorTimerRef.current = null;
           }
         }
-        setMessages(items);
+        setMessages(mergedItems);
         void enrichConversationParticipantsMeta({
           currentUserUid: user.uid,
           currentUserTelecomNumber: user.telecomNumber,
@@ -369,7 +388,7 @@ export default function SmsPage() {
         conversationErrorTimerRef.current = null;
       }
     };
-  }, [messageLimit, selectedContact?.telecomNumber, selectedContact?.uid, selectedConversationId, user]);
+  }, [mergeServerAndOptimisticMessages, messageLimit, selectedContact?.telecomNumber, selectedContact?.uid, selectedConversationId, user]);
 
   useEffect(() => {
     if (!selectedContact || !selectedConversationId) {
@@ -387,18 +406,50 @@ export default function SmsPage() {
 
   const sendMessage = useCallback(async () => {
     if (!user || !selectedContact || sending) return;
+    const outgoingBody = messageBody.trim();
+    if (!outgoingBody) return;
+    const tempId = `temp-${Date.now()}-${optimisticCounterRef.current++}`;
+    const localTimestamp = buildLocalTimestamp();
+    const optimisticMessage: TelecomMessage = {
+      id: tempId,
+      conversationId: selectedConversationId,
+      senderId: user.uid,
+      receiverId: selectedContact.uid,
+      body: outgoingBody,
+      status: 'sent',
+      type: 'text',
+      createdAt: localTimestamp,
+      updatedAt: localTimestamp,
+    };
+    optimisticMessagesRef.current.set(tempId, optimisticMessage);
+    setMessages((current) => {
+      const merged = new Map(current.map((item) => [item.id, item] as const));
+      merged.set(tempId, optimisticMessage);
+      return [...merged.values()].sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0));
+    });
+    setMessageBody('');
     setSending(true);
     try {
       const messageId = await sendInternalMessage({
         senderId: user.uid,
         receiverId: selectedContact.uid,
-        body: messageBody,
+        body: outgoingBody,
         type: 'text',
       });
+      const optimisticCurrent = optimisticMessagesRef.current.get(tempId);
+      optimisticMessagesRef.current.delete(tempId);
+      if (optimisticCurrent) {
+        optimisticMessagesRef.current.set(messageId, { ...optimisticCurrent, id: messageId });
+      }
+      setMessages((current) =>
+        current.map((item) => (item.id === tempId ? { ...item, id: messageId } : item))
+      );
       void sendInternalMessagePush(messageId);
-      setMessageBody('');
       void setTypingState(user.uid, selectedConversationId, false);
     } catch (error) {
+      optimisticMessagesRef.current.delete(tempId);
+      setMessages((current) => current.filter((item) => item.id !== tempId));
+      setMessageBody(outgoingBody);
       const message = error instanceof Error ? error.message : 'Message impossible';
       if (error instanceof FirebaseError && error.code === 'permission-denied') {
         showToast({ message: 'Permission refusée: vous ne pouvez pas écrire ce message.', variant: 'error' });
@@ -621,4 +672,8 @@ async function sendInternalMessagePush(messageId: string): Promise<void> {
 
 function buildMessageDedupeKey(messageId?: string, senderId?: string, body?: string): string {
   return messageId || `${senderId || 'unknown'}::${(body || '').slice(0, 64)}`;
+}
+
+function buildLocalTimestamp(): TelecomMessage['createdAt'] {
+  return Timestamp.now();
 }
