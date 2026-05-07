@@ -713,6 +713,7 @@ export async function createInternalGroup(input: {
     await deleteDoc(doc(db, 'telecom_groups', groupRef.id));
     throw new Error('CREATE_GROUP_STEP_MESSAGES_FAILED');
   }
+  console.log('[CREATE GROUP SUCCESS]', { groupId: groupRef.id, conversationId });
   return { groupId: groupRef.id, conversationId };
 }
 
