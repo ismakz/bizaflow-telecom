@@ -74,6 +74,22 @@ service cloud.firestore {
       );
     }
 
+    function groupDoc(groupId) {
+      return get(/databases/$(database)/documents/telecom_groups/$(groupId)).data;
+    }
+
+    function groupExists(groupId) {
+      return exists(/databases/$(database)/documents/telecom_groups/$(groupId));
+    }
+
+    function isGroupMember(groupId) {
+      return groupExists(groupId) && request.auth.uid in groupDoc(groupId).memberIds;
+    }
+
+    function isGroupAdmin(groupId) {
+      return isCEO() || (groupExists(groupId) && request.auth.uid in groupDoc(groupId).adminIds);
+    }
+
     function isSafeSelfUserUpdate(uid) {
       return isOwner(uid) &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly([
@@ -268,9 +284,17 @@ service cloud.firestore {
         )
       );
 
-      allow create: if isApproved()
-        && conversationIdMatches(conversationId, request.resource.data.participantIds)
-        && request.auth.uid in request.resource.data.participantIds;
+      allow create: if (
+          isApproved()
+          && conversationIdMatches(conversationId, request.resource.data.participantIds)
+          && request.auth.uid in request.resource.data.participantIds
+        ) || (
+          isApproved()
+          && request.resource.data.type == "group"
+          && request.resource.data.groupId is string
+          && conversationId == request.resource.data.groupId
+          && request.auth.uid in request.resource.data.participantIds
+        );
 
       allow update: if isCEO() || (
         (
@@ -282,9 +306,29 @@ service cloud.firestore {
           request.resource.data.participantIds == resource.data.participantIds ||
           request.resource.data.participants == resource.data.participants
         )
+      ) || (
+        isApproved()
+        && resource.data.type == "group"
+        && resource.data.groupId is string
+        && isGroupAdmin(resource.data.groupId)
       );
 
       allow delete: if isCEO();
+    }
+
+    match /telecom_groups/{groupId} {
+      allow read: if isApproved() && (
+        isCEO() ||
+        uidInParticipants(resource.data.memberIds)
+      );
+
+      allow create: if isApproved()
+        && request.resource.data.createdBy == request.auth.uid
+        && request.auth.uid in request.resource.data.memberIds
+        && request.auth.uid in request.resource.data.adminIds;
+
+      allow update: if isApproved() && isGroupAdmin(groupId);
+      allow delete: if isApproved() && isGroupAdmin(groupId);
     }
 
     // =========================
@@ -317,16 +361,22 @@ service cloud.firestore {
 
       allow create: if isApproved()
         && request.resource.data.senderId == request.auth.uid
-        && request.resource.data.receiverId is string
-        && request.resource.data.receiverId != request.auth.uid
         && request.resource.data.body is string
-        && (
-          request.resource.data.body.size() > 0 ||
-          request.resource.data.mediaUrl is string
-        )
+        && request.resource.data.body.size() > 0
         && request.resource.data.body.size() <= 2000
         && request.resource.data.conversationId is string
-        && messageConversationMatches(request.resource.data);
+        && (
+          (
+            request.resource.data.receiverId is string
+            && request.resource.data.receiverId != request.auth.uid
+            && messageConversationMatches(request.resource.data)
+          ) || (
+            request.resource.data.groupId is string
+            && request.resource.data.conversationId == request.resource.data.groupId
+            && isGroupMember(request.resource.data.groupId)
+            && request.resource.data.type in ["text", "system"]
+          )
+        );
 
       allow update: if isCEO() || (
         isApproved()
@@ -349,11 +399,36 @@ service cloud.firestore {
               uidInParticipants(conversationDoc(resource.data.conversationId).participants)
             )
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["reactionsByUser", "updatedAt"])
+          ) ||
+          (
+            (
+              uidInParticipants(conversationDoc(resource.data.conversationId).participantIds) ||
+              uidInParticipants(conversationDoc(resource.data.conversationId).participants)
+            )
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["statusByUser", "updatedAt", "readAt", "deliveredAt", "status"])
           )
         )
       );
 
       allow delete: if isCEO();
+    }
+
+    match /telecom_statuses/{statusId} {
+      allow read: if isApproved();
+
+      allow create: if isApproved()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.type in ["text", "image"];
+
+      allow update: if isApproved() && (
+        resource.data.userId == request.auth.uid ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(["viewers", "updatedAt"])
+      );
+
+      allow delete: if isCEO() || (
+        isApproved() &&
+        resource.data.userId == request.auth.uid
+      );
     }
 
     // =========================

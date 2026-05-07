@@ -31,7 +31,14 @@ const badgeStyle = {
 } satisfies React.CSSProperties;
 
 export type ConversationRow = {
-  contact: InternalTelecomUser;
+  id: string;
+  kind: 'direct' | 'group';
+  title: string;
+  subtitle: string;
+  presence?: InternalTelecomUser['presenceStatus'];
+  roleLabel?: string;
+  photoUrl?: string | null;
+  contactUid?: string;
   conversation?: TelecomConversation;
   unread: number;
 };
@@ -39,13 +46,13 @@ export type ConversationRow = {
 export function ConversationList(props: {
   rows: ConversationRow[];
   search: string;
-  selectedUserId: string;
-  onSelect: (userId: string) => void;
+  selectedRowId: string;
+  onSelect: (row: ConversationRow) => void;
 }) {
   const filtered = props.rows.filter((row) => {
     if (!props.search.trim()) return true;
     const q = props.search.toLowerCase();
-    return [row.contact.name, row.contact.telecomNumber, row.contact.role, row.conversation?.lastMessage || '']
+    return [row.title, row.subtitle, row.conversation?.lastMessage || '']
       .join(' ')
       .toLowerCase()
       .includes(q);
@@ -54,7 +61,7 @@ export function ConversationList(props: {
   if (filtered.length === 0) {
     return (
       <div style={{ color: '#64748b', textAlign: 'center', padding: 24, fontSize: '0.82rem' }}>
-        Aucun utilisateur interne actif
+        Aucune conversation disponible
       </div>
     );
   }
@@ -62,12 +69,12 @@ export function ConversationList(props: {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       {filtered.map((row) => {
-        const { contact, conversation, unread } = row;
-        const active = contact.uid === props.selectedUserId;
+        const { conversation, unread } = row;
+        const active = row.id === props.selectedRowId;
         return (
           <button
-            key={contact.uid}
-            onClick={() => props.onSelect(contact.uid)}
+            key={row.id}
+            onClick={() => props.onSelect(row)}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -82,22 +89,29 @@ export function ConversationList(props: {
             }}
           >
             <div style={{ width: 38, height: 38, borderRadius: '50%', background: 'rgba(6,182,212,0.12)', color: '#06b6d4', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 900, flexShrink: 0 }}>
-              {getInitials(contact.name)}
+              {getInitials(row.title)}
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'space-between' }}>
-                <span style={{ fontWeight: 800, fontSize: '0.83rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{contact.name}</span>
+                <span style={{ fontWeight: 800, fontSize: '0.83rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {row.title}
+                  {row.kind === 'group' ? ' · Groupe' : ''}
+                </span>
                 <span style={{ color: '#64748b', fontSize: '0.62rem', flexShrink: 0 }}>
                   {formatTime(conversation?.lastMessageAt ? new Date(conversation.lastMessageAt.seconds * 1000).toISOString() : null)}
                 </span>
                 {unread > 0 && <span style={badgeStyle}>{unread}</span>}
               </div>
               <div style={{ color: '#94a3b8', fontSize: '0.7rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {conversation?.lastMessage || contact.telecomNumber}
+                {conversation?.lastMessage || row.subtitle}
               </div>
-              <div style={{ color: statusColors[contact.presenceStatus], fontSize: '0.67rem', marginTop: 2 }}>
-                {statusLabels[contact.presenceStatus]} · {contact.role}
-              </div>
+              {row.kind === 'direct' && row.presence ? (
+                <div style={{ color: statusColors[row.presence], fontSize: '0.67rem', marginTop: 2 }}>
+                  {statusLabels[row.presence]}{row.roleLabel ? ` · ${row.roleLabel}` : ''}
+                </div>
+              ) : (
+                <div style={{ color: '#94a3b8', fontSize: '0.67rem', marginTop: 2 }}>Discussion de groupe</div>
+              )}
             </div>
           </button>
         );
