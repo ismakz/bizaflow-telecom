@@ -42,7 +42,20 @@ export function MessageList(props: {
               fontSize: '0.86rem',
               lineHeight: 1.45,
             }}>
-              {message.body}
+              {message.type === 'audio' && message.mediaUrl ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 200 }}>
+                  <span style={{ fontSize: '0.78rem', opacity: 0.92 }}>Message vocal</span>
+                  <audio
+                    controls
+                    src={message.mediaUrl}
+                    style={{ width: '100%', maxWidth: 280, height: 36 }}
+                    preload="metadata"
+                  />
+                  {message.body.trim() ? <span>{message.body}</span> : null}
+                </div>
+              ) : (
+                message.body
+              )}
             </div>
             <div style={{ color: '#64748b', fontSize: '0.62rem', marginTop: 3, textAlign: mine ? 'right' : 'left', display: 'flex', alignItems: 'center', justifyContent: mine ? 'flex-end' : 'flex-start', gap: 5 }}>
               {formatTime(message.createdAt ? new Date(message.createdAt.seconds * 1000).toISOString() : null)}

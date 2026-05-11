@@ -722,9 +722,18 @@ export async function sendGroupMessage(input: {
   groupId: string;
   senderId: string;
   body: string;
+  type?: TelecomMessageType;
+  mediaUrl?: string | null;
+  mediaName?: string | null;
+  mediaMimeType?: string | null;
+  mediaSize?: number | null;
 }): Promise<string> {
   const body = input.body.trim();
-  if (!body) throw new Error('MESSAGE_BODY_REQUIRED');
+  const messageType = input.type || 'text';
+  const isText = messageType === 'text';
+  if (isText && !body) throw new Error('MESSAGE_BODY_REQUIRED');
+  if (!isText && !input.mediaUrl) throw new Error('MESSAGE_MEDIA_REQUIRED');
+  if (body.length > 2000) throw new Error('MESSAGE_BODY_TOO_LONG');
   const groupSnap = await getDoc(doc(db, 'telecom_groups', input.groupId));
   if (!groupSnap.exists()) throw new Error('GROUP_NOT_FOUND');
   const group = groupSnap.data() as TelecomGroup;
@@ -742,7 +751,11 @@ export async function sendGroupMessage(input: {
     senderUserId: input.senderId,
     targetUserId: null,
     body,
-    type: 'text',
+    type: messageType,
+    mediaUrl: input.mediaUrl || null,
+    mediaName: input.mediaName || null,
+    mediaMimeType: input.mediaMimeType || null,
+    mediaSize: input.mediaSize || null,
     participantIds: group.memberIds,
     participantNumbers: [],
     status: 'sent',
@@ -755,7 +768,7 @@ export async function sendGroupMessage(input: {
     groupId: input.groupId,
     participantIds: group.memberIds,
     participants: group.memberIds,
-    lastMessage: body,
+    lastMessage: body || `[${messageType}]`,
     lastMessageAt: now,
     unreadCountByUser: group.memberIds.reduce((acc, uid) => {
       acc[`unreadCountByUser.${uid}`] = uid === input.senderId ? 0 : increment(1);
