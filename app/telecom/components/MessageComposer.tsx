@@ -19,7 +19,16 @@ function pickRecorderMime(): string | undefined {
   return undefined;
 }
 
-export function MessageComposer(props: {
+export function MessageComposer({
+  messageBody,
+  sending,
+  sendingVoice,
+  voiceEnabled,
+  onChange,
+  onSend,
+  onBlur,
+  onVoiceSend,
+}: {
   messageBody: string;
   sending: boolean;
   sendingVoice: boolean;
@@ -98,14 +107,14 @@ export function MessageComposer(props: {
       stopStream();
       const durationSec = (Date.now() - startedAtRef.current) / 1000;
       if (durationSec >= MIN_VOICE_SEC && blob.size > 0) {
-        void props.onVoiceSend({ blob, mimeType: mime, durationSec });
+        void onVoiceSend({ blob, mimeType: mime, durationSec });
       }
     };
     recorder.stop();
-  }, [cancelRecording, clearTick, props.onVoiceSend, stopStream]);
+  }, [cancelRecording, clearTick, onVoiceSend, stopStream]);
 
   const startRecording = useCallback(async () => {
-    if (!props.voiceEnabled || props.sending || props.sendingVoice || recording) return;
+    if (!voiceEnabled || sending || sendingVoice || recording) return;
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
       return;
     }
@@ -135,10 +144,10 @@ export function MessageComposer(props: {
       stopStream();
       setRecording(false);
     }
-  }, [finishRecording, props.sending, props.sendingVoice, props.voiceEnabled, recording, stopStream]);
+  }, [finishRecording, sending, sendingVoice, voiceEnabled, recording, stopStream]);
 
-  const busy = props.sending || props.sendingVoice;
-  const micDisabled = !props.voiceEnabled || busy || recording;
+  const busy = sending || sendingVoice;
+  const micDisabled = !voiceEnabled || busy || recording;
 
   return (
     <div style={{ padding: 12, borderTop: '1px solid rgba(255,255,255,0.06)', display: 'grid', gap: 8, position: 'sticky', bottom: 0, background: 'rgba(15,23,42,0.75)', backdropFilter: 'blur(6px)' }}>
@@ -184,13 +193,13 @@ export function MessageComposer(props: {
         </button>
         <input
           className="input-field"
-          value={props.messageBody}
-          onChange={(event) => props.onChange(event.target.value)}
-          onBlur={props.onBlur}
+          value={messageBody}
+          onChange={(event) => onChange(event.target.value)}
+          onBlur={onBlur}
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault();
-              props.onSend();
+              onSend();
             }
           }}
           placeholder="Écrire un SMS interne..."
@@ -198,15 +207,15 @@ export function MessageComposer(props: {
           disabled={busy}
         />
         <button
-          onClick={props.onSend}
-          disabled={!props.messageBody.trim() || busy}
+          onClick={onSend}
+          disabled={!messageBody.trim() || busy}
           className="btn-primary"
-          style={{ width: 112, flex: '0 0 112px', opacity: !props.messageBody.trim() || busy ? 0.55 : 1, whiteSpace: 'nowrap' }}
+          style={{ width: 112, flex: '0 0 112px', opacity: !messageBody.trim() || busy ? 0.55 : 1, whiteSpace: 'nowrap' }}
         >
           Envoyer
         </button>
       </div>
-      {props.sendingVoice ? (
+      {sendingVoice ? (
         <div style={{ color: '#94a3b8', fontSize: '0.72rem' }}>Envoi du message vocal…</div>
       ) : null}
     </div>

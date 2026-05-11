@@ -90,6 +90,18 @@ service cloud.firestore {
       return isCEO() || (groupExists(groupId) && request.auth.uid in groupDoc(groupId).adminIds);
     }
 
+    // Message système à la création d’un groupe : le batch peut rendre la lecture
+    // de la conversation encore indisponible pour isConversationParticipant.
+    function isGroupSystemBootstrapMessage(data) {
+      return data.type == "system"
+        && data.groupId is string
+        && data.conversationId is string
+        && data.groupId == data.conversationId
+        && data.senderId == request.auth.uid
+        && groupExists(data.groupId)
+        && request.auth.uid in groupDoc(data.groupId).memberIds;
+    }
+
     function conversationParticipantIds(conversationId) {
       return get(/databases/$(database)/documents/telecom_conversations/$(conversationId)).data.participantIds;
     }
@@ -309,9 +321,11 @@ service cloud.firestore {
           && request.resource.data.type == "group"
           && request.resource.data.groupId is string
           && conversationId == request.resource.data.groupId
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.participantIds is list
+          && request.auth.uid in request.resource.data.participantIds
           && groupExists(request.resource.data.groupId)
           && request.auth.uid in groupDoc(request.resource.data.groupId).memberIds
-          && request.auth.uid in request.resource.data.participantIds
         );
 
       allow update: if isCEO() || (
@@ -370,7 +384,10 @@ service cloud.firestore {
         && request.resource.data.body.size() > 0
         && request.resource.data.body.size() <= 2000
         && request.resource.data.conversationId is string
-        && isConversationParticipant(request.resource.data.conversationId);
+        && (
+          isConversationParticipant(request.resource.data.conversationId) ||
+          isGroupSystemBootstrapMessage(request.resource.data)
+        );
 
       allow update: if isCEO() || (
         isApproved()

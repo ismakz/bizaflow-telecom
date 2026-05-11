@@ -1134,6 +1134,8 @@ const activationModalStyle = {
 } satisfies React.CSSProperties;
 
 function explainError(message: string): string {
+  if (message.includes('CREATE_GROUP_PERMISSION_DENIED')) return 'Création groupe refusée (droits Firestore).';
+  if (message.includes('CREATE_GROUP_FAILED')) return 'Création groupe impossible.';
   if (message.includes('CREATE_GROUP_STEP_TELECOM_GROUPS_FAILED')) return 'Création groupe refusée (telecom_groups).';
   if (message.includes('CREATE_GROUP_STEP_CONVERSATIONS_FAILED')) return 'Création conversation groupe refusée.';
   if (message.includes('CREATE_GROUP_STEP_MESSAGES_FAILED')) return 'Création message système groupe refusée.';
