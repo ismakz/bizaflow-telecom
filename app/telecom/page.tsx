@@ -37,6 +37,7 @@ import {
   updateGroupMembers,
 } from '@/app/lib/internalTelecom';
 import { auth, db } from '@/app/lib/firebase';
+import { uploadMedia } from '@/app/lib/telecomMedia';
 import { onForegroundPushMessage, registerPushToken } from '@/app/lib/pushNotifications';
 import { ConversationList } from '@/app/telecom/components/ConversationList';
 import { ChatHeader } from '@/app/telecom/components/ChatHeader';
@@ -75,6 +76,7 @@ export default function SmsPage() {
   const [notificationStatus, setNotificationStatus] = useState('');
   const [blockingSmsError, setBlockingSmsError] = useState('');
   const [sending, setSending] = useState(false);
+  const [sendingVoice, setSendingVoice] = useState(false);
   const [messageLimit, setMessageLimit] = useState(40);
   const [isMobile, setIsMobile] = useState(false);
   const [showConversationMobile, setShowConversationMobile] = useState(false);
@@ -289,7 +291,12 @@ export default function SmsPage() {
           notifiedMessageIdsRef.current.add(buildMessageDedupeKey(message.id, message.senderId, message.body));
           const sender = contacts.find((contact) => contact.uid === message.senderId);
           const senderName = sender?.name || 'Contact Bizaflow';
-          const preview = message.body.length > 90 ? `${message.body.slice(0, 87)}...` : message.body;
+          const preview =
+            message.type === 'audio'
+              ? 'Message vocal'
+              : message.body.length > 90
+                ? `${message.body.slice(0, 87)}...`
+                : message.body;
           showToast({ message: `${senderName}: ${preview}`, variant: 'info' });
           playMessageSound();
         });
@@ -549,6 +556,110 @@ export default function SmsPage() {
       setSending(false);
     }
   }, [messageBody, selectedContact, selectedConversationId, selectedGroupId, selectedRowType, sending, showToast, user]);
+
+  const voiceEnabled = Boolean(
+    user &&
+      selectedConversationId &&
+      (selectedRowType === 'group' ? selectedGroupId : selectedContact)
+  );
+
+  const sendVoiceMessage = useCallback(
+    async ({ blob, mimeType }: { blob: Blob; mimeType: string; durationSec: number }) => {
+      if (!user || sendingVoice) return;
+      const isGroupConversation = selectedRowType === 'group' && Boolean(selectedGroupId);
+      if (!isGroupConversation && !selectedContact) return;
+      if (!selectedConversationId) return;
+
+      const mime = mimeType || 'audio/webm';
+      const ext = mime.includes('webm') ? 'webm' : mime.includes('ogg') ? 'ogg' : mime.includes('mp4') || mime.includes('m4a') ? 'm4a' : 'webm';
+      const file = new File([blob], `voice-${Date.now()}.${ext}`, { type: mime });
+
+      setSendingVoice(true);
+      let tempId = '';
+      try {
+        const uploaded = await uploadMedia({
+          file,
+          uploaderUid: user.uid,
+          conversationId: selectedConversationId,
+          mediaType: 'audio',
+          fileName: file.name,
+          mimeType: file.type,
+        });
+
+        tempId = `temp-${Date.now()}-${optimisticCounterRef.current++}`;
+        const localTimestamp = buildLocalTimestamp();
+        const optimisticMessage: TelecomMessage = {
+          id: tempId,
+          conversationId: selectedConversationId,
+          groupId: isGroupConversation ? selectedGroupId : null,
+          senderId: user.uid,
+          receiverId: isGroupConversation ? user.uid : (selectedContact?.uid || user.uid),
+          body: '',
+          status: 'sent',
+          type: 'audio',
+          mediaUrl: uploaded.url,
+          mediaName: uploaded.name,
+          mediaMimeType: uploaded.mimeType,
+          mediaSize: uploaded.size,
+          createdAt: localTimestamp,
+          updatedAt: localTimestamp,
+        };
+        optimisticMessagesRef.current.set(tempId, optimisticMessage);
+        setMessages((current) => {
+          const merged = new Map(current.map((item) => [item.id, item] as const));
+          merged.set(tempId, optimisticMessage);
+          return [...merged.values()].sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0));
+        });
+
+        const messageId = isGroupConversation
+          ? await sendGroupMessage({
+              conversationId: selectedConversationId,
+              groupId: selectedGroupId,
+              senderId: user.uid,
+              body: '',
+              type: 'audio',
+              mediaUrl: uploaded.url,
+              mediaName: uploaded.name,
+              mediaMimeType: uploaded.mimeType,
+              mediaSize: uploaded.size,
+            })
+          : await sendInternalMessage({
+              senderId: user.uid,
+              receiverId: selectedContact?.uid || '',
+              body: '',
+              type: 'audio',
+              mediaUrl: uploaded.url,
+              mediaName: uploaded.name,
+              mediaMimeType: uploaded.mimeType,
+              mediaSize: uploaded.size,
+            });
+
+        const optimisticCurrent = optimisticMessagesRef.current.get(tempId);
+        optimisticMessagesRef.current.delete(tempId);
+        if (optimisticCurrent) {
+          optimisticMessagesRef.current.set(messageId, { ...optimisticCurrent, id: messageId });
+        }
+        setMessages((current) => current.map((item) => (item.id === tempId ? { ...item, id: messageId } : item)));
+        if (!isGroupConversation) {
+          void sendInternalMessagePush(messageId);
+        }
+      } catch (error) {
+        if (tempId) {
+          optimisticMessagesRef.current.delete(tempId);
+          setMessages((current) => current.filter((item) => item.id !== tempId));
+        }
+        const message = error instanceof Error ? error.message : 'Message vocal impossible';
+        if (error instanceof FirebaseError && error.code === 'permission-denied') {
+          showToast({ message: 'Permission refusée: envoi impossible.', variant: 'error' });
+        } else {
+          showToast({ message: explainError(message), variant: 'error' });
+        }
+      } finally {
+        setSendingVoice(false);
+      }
+    },
+    [selectedContact, selectedConversationId, selectedGroupId, selectedRowType, sendingVoice, showToast, user]
+  );
 
   const handleMessageChange = useCallback((value: string) => {
     setMessageBody(value);
@@ -832,8 +943,11 @@ export default function SmsPage() {
                 <MessageComposer
                   messageBody={messageBody}
                   sending={sending}
+                  sendingVoice={sendingVoice}
+                  voiceEnabled={voiceEnabled}
                   onChange={handleMessageChange}
                   onSend={() => void sendMessage()}
+                  onVoiceSend={(payload) => void sendVoiceMessage(payload)}
                   onBlur={() => {
                     if (user?.uid && selectedConversationId && selectedRowType !== 'group') {
                       void setTypingState(user.uid, selectedConversationId, false);
@@ -1020,6 +1134,8 @@ const activationModalStyle = {
 } satisfies React.CSSProperties;
 
 function explainError(message: string): string {
+  if (message.includes('CREATE_GROUP_PERMISSION_DENIED')) return 'Création groupe refusée (droits Firestore).';
+  if (message.includes('CREATE_GROUP_FAILED')) return 'Création groupe impossible.';
   if (message.includes('CREATE_GROUP_STEP_TELECOM_GROUPS_FAILED')) return 'Création groupe refusée (telecom_groups).';
   if (message.includes('CREATE_GROUP_STEP_CONVERSATIONS_FAILED')) return 'Création conversation groupe refusée.';
   if (message.includes('CREATE_GROUP_STEP_MESSAGES_FAILED')) return 'Création message système groupe refusée.';
